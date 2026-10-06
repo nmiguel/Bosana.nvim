@@ -22,7 +22,7 @@ local function no_server(err)
 end
 
 function M.new(opts)
-  local prefix = { opts.tmux or "tmux" }
+  local prefix = { "tmux" }
   if opts.socket_path then
     vim.list_extend(prefix, { "-S", opts.socket_path })
   elseif opts.socket_name then
@@ -31,24 +31,17 @@ function M.new(opts)
   return setmetatable({ prefix = prefix, timeout_ms = opts.timeout_ms or 5000 }, Client)
 end
 
-function M.check_executable(executable)
-  executable = executable or "tmux"
-  if vim.fn.executable(executable) ~= 1 then
-    local location = executable:find("[/\\]") and "does not exist or is not executable"
-      or "was not found in PATH or is not executable"
+function M.check_executable()
+  if vim.fn.executable("tmux") ~= 1 then
     return nil,
-      "tmux executable '"
-        .. executable
-        .. "' "
-        .. location
-        .. ". Install tmux and add it to PATH, or configure Bosana's tmux option with its executable path."
+      "tmux executable 'tmux' was not found in PATH or is not executable. Install tmux and add it to PATH."
   end
-  local path = vim.fn.exepath(executable)
-  return path ~= "" and path or executable
+  local path = vim.fn.exepath("tmux")
+  return path ~= "" and path or "tmux"
 end
 
 function Client:run(args)
-  local executable, executable_err = M.check_executable(self.prefix[1])
+  local executable, executable_err = M.check_executable()
   if not executable then
     return nil, executable_err
   end

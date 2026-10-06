@@ -15,7 +15,7 @@ function M.open(opts)
   if not ok then
     return nil, tostring(options)
   end
-  local executable, executable_err = tmux.check_executable(options.tmux)
+  local executable, executable_err = tmux.check_executable()
   if not executable then
     return nil, executable_err
   end

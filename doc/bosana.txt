@@ -75,7 +75,6 @@ COMMANDS                                                    *bosana-commands*
 CONFIGURATION                                               *bosana-configuration*
 >lua
     require("bosana").setup({
-      tmux = "tmux",
       timeout_ms = 5000,
       -- socket_name = "work",
       -- socket_path = "/tmp/work.sock",
@@ -153,15 +152,13 @@ HEALTH CHECKS                                               *bosana-health*
 
 Run :checkhealth bosana (also available as :checkhealth Bosana).
 
-Checks Neovim 0.10+, configuration validity, the configured tmux executable and
+Checks Neovim 0.10+, configuration validity, the tmux executable on PATH and its
 version, access to the selected server, unsupported server topology, and host
 exclusion when configured. This only reads tmux state; it does not change any
 sessions, windows, or options. No running sessions is an informational result.
 
-Before opening and before each tmux command, Bosana checks that the configured
-executable is available. If tmux is missing from PATH, an explicit error explains
-how to install it or configure an executable path: >lua
-    require("bosana").setup({ tmux = "/path/to/tmux" })
-<
+Bosana always runs tmux from PATH. Before opening and before each tmux command,
+it checks that tmux is available and executable. If not, an explicit error asks
+you to install tmux and add it to PATH.
 
 vim:tw=78:ts=8:ft=help:norl:

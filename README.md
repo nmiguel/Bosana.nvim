@@ -38,10 +38,9 @@ Run `:checkhealth bosana` (or `:checkhealth Bosana`) to check Neovim compatibili
 configuration, tmux executable/version, selected server access, and host exclusion
 when configured. The health check only reads tmux state.
 
-Bosana checks the configured tmux executable before opening and before every
-tmux command. If the default `tmux` cannot be found on `PATH`, it reports an
-explicit error with installation/configuration guidance. An absolute executable
-path configured through `setup({ tmux = "/path/to/tmux" })` also works.
+Bosana always runs `tmux` from `PATH`, checking its availability before opening
+and before every tmux command. If `tmux` cannot be found or is not executable,
+it reports an explicit error asking you to install tmux and add it to `PATH`.
 
 Open with `:Bosana`, or map a key:
 
@@ -167,7 +166,6 @@ checkout, run `:helptags /path/to/bosana/doc` before using `:help bosana`.
 
 ```lua
 require("bosana").setup({
-  tmux = "tmux",             -- Executable name or path.
   timeout_ms = 5000,          -- Per-command timeout.
   -- socket_name = "work",   -- tmux -L; mutually exclusive with socket_path.
   -- socket_path = "/tmp/work.sock", -- tmux -S.

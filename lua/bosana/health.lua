@@ -18,7 +18,7 @@ function M.check()
   end
   vim.health.ok("Bosana configuration is valid")
 
-  local executable, executable_err = tmux.check_executable(opts.tmux)
+  local executable, executable_err = tmux.check_executable()
   if not executable then
     vim.health.error(executable_err)
     return

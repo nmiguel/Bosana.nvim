@@ -394,10 +394,26 @@ t.test("concealed IDs survive linewise cut/paste and undo", function()
   local bufnr = open(path)
   t.eq(vim.bo[bufnr].buftype, "acwrite")
   t.eq(vim.wo.conceallevel, 3)
-  t.eq(vim.fn.synconcealed(1, 1)[1], 1)
+  t.eq(vim.wo.concealcursor, "nvic")
   local original = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+  local function assert_concealed(lines)
+    for row, line in ipairs(lines) do
+      local prefix = t.ok(line:match("^/[%$@]%d+ "))
+      for column = 1, #prefix do
+        local concealed = vim.fn.synconcealed(row, column)
+        t.eq(concealed[1], 1, "ID prefix must be concealed")
+        t.eq(concealed[2], "", "ID prefix must not have a replacement character")
+      end
+      -- The four-space indentation and all name characters remain visible.
+      for column = #prefix + 1, #line do
+        t.eq(vim.fn.synconcealed(row, column)[1], 0)
+      end
+    end
+  end
+  assert_concealed(original)
   vim.cmd("normal! 2GddGp")
   local edited = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+  assert_concealed(edited)
   t.eq(edited[#edited], original[2])
   t.eq(
     t.parse(edited, baseline).by_window[baseline.sessions[1].windows[1].id].session_id,
@@ -405,6 +421,67 @@ t.test("concealed IDs survive linewise cut/paste and undo", function()
   )
   vim.cmd("normal! u")
   t.eq(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), original)
+  assert_concealed(original)
+end)
+
+t.test("rendered rows hide IDs in normal and insert modes with syntax disabled globally", function()
+  local channel = vim.fn.jobstart({ "nvim", "--embed", "--headless", "-u", "NONE" }, { rpc = true })
+  t.ok(channel > 0, "Could not start the Neovim UI test")
+  local ok, err = xpcall(function()
+    vim.rpcrequest(channel, "nvim_ui_attach", 50, 12, {})
+    vim.rpcrequest(
+      channel,
+      "nvim_exec_lua",
+      [[
+      vim.opt.runtimepath:prepend(...)
+      assert(not vim.g.syntax_on)
+      local snapshot = require('bosana.model').index({
+        server_id = 'screen-test',
+        sessions = {
+          { id = '$123', name = 'work', windows = {
+            { id = '@4567', name = 'editor /@89', index = 0 },
+          } },
+        },
+      })
+      require('bosana.buffer').create({}, snapshot, { keymaps = false }, 'screen-test')
+    ]],
+      { vim.fn.getcwd() }
+    )
+    local function screen_row(row)
+      return vim.rpcrequest(
+        channel,
+        "nvim_exec_lua",
+        [[
+        local row = ...
+        vim.cmd('redraw!')
+        local text = {}
+        for column = 1, 50 do
+          text[column] = vim.fn.screenstring(row, column)
+        end
+        return table.concat(text):gsub(' +$', '')
+      ]],
+        { row }
+      )
+    end
+    t.eq(screen_row(1), "work")
+    t.eq(screen_row(2), "    editor /@89")
+    vim.rpcrequest(channel, "nvim_win_set_cursor", 0, { 2, 11 })
+    vim.rpcrequest(channel, "nvim_input", "i")
+    t.ok(
+      vim.wait(1000, function()
+        return vim.rpcrequest(channel, "nvim_get_mode").mode:sub(1, 1) == "i"
+      end, 10),
+      "UI test did not enter insert mode"
+    )
+    t.eq(screen_row(1), "work")
+    t.eq(screen_row(2), "    editor /@89")
+    t.eq(vim.rpcrequest(channel, "nvim_buf_get_lines", 0, 0, -1, false), {
+      "/$123 work",
+      "/@4567     editor /@89",
+    })
+  end, debug.traceback)
+  vim.fn.jobstop(channel)
+  t.ok(ok, err)
 end)
 
 t.test(":w applies edits, refreshes the baseline, and resets undo", function()

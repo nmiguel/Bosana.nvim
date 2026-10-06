@@ -1,7 +1,6 @@
 local M = {}
 
 M.defaults = {
-  tmux = "tmux",
   socket_name = nil,
   socket_path = nil,
   timeout_ms = 5000,
@@ -18,8 +17,10 @@ M.defaults = {
 local configured = vim.deepcopy(M.defaults)
 
 function M.validate(opts)
-  if type(opts.tmux) ~= "string" or opts.tmux == "" then
-    error("tmux must be an executable name or path", 0)
+  for key in pairs(opts) do
+    if M.defaults[key] == nil and key ~= "socket_name" and key ~= "socket_path" then
+      error("Unknown Bosana option: " .. tostring(key), 0)
+    end
   end
   if opts.socket_name and opts.socket_path then
     error("Use either socket_name or socket_path, not both", 0)
