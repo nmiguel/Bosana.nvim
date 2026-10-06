@@ -1,0 +1,167 @@
+*bosana.txt*      Edit tmux sessions and windows as a Neovim buffer
+
+=============================================================================
+CONTENTS                                                    *bosana*
+
+    Usage                  |bosana-usage|
+    Editing                |bosana-editing|
+    Commands               |bosana-commands|
+    Configuration          |bosana-configuration|
+    Lua API                |bosana-api|
+    Dedicated tmux session |bosana-manager|
+    Recovery               |bosana-recovery|
+    Health checks          |bosana-health|
+
+Requires Neovim 0.10+ and tmux. There are no Lua dependencies.
+
+=============================================================================
+USAGE                                                       *bosana-usage*
+
+Open the editor with :Bosana or: >lua
+    require("bosana").open()
+<
+The buffer shows sessions with their windows indented by four spaces. IDs are
+concealed text at the start of each row. Use normal linewise edits, then :w to
+apply them. :wq applies successfully before exiting; :q! discards pending edits.
+
+Default buffer mappings:
+    q       Close (refuses unsaved edits).
+    CTRL-L  Refresh (refuses unsaved edits).
+    g?      Open this help.
+
+=============================================================================
+EDITING                                                     *bosana-editing*
+
+An internal row is "/$1 session" or "/@2     window". The ID and following
+separator are concealed. Window indentation is four additional spaces.
+
+Rename by editing the name with cw, C, A, or a substitution. Keep the hidden
+prefix intact; cc removes it. IDs travel with linewise cut/paste and undo.
+
+    Edit name                  Rename session/window.
+    Remove window row          Delete window.
+    Move beneath a session     Transfer window.
+    Reorder window rows        Reorder windows, preserving index slots/gaps.
+    Remove/empty a session     Delete session; first preserve moved-out windows.
+    Reorder session blocks     No effect.
+
+Membership changes honor renumber-windows. Active windows stay selected when
+they survive in their original sessions. Window labels use window_name, not
+pane_title; rename-window disables automatic-rename as it normally does.
+
+Successful writes refresh state and clear undo history. Undo cannot restore
+obsolete IDs after a save. Invalid writes show diagnostics and remain modified.
+
+Unsupported in this version: creation, pane editing, linked/shared windows,
+grouped sessions, duplicate IDs, control characters in names, empty names,
+surrounding whitespace in names, and session names containing '.' or ':'.
+Window names may repeat; retained session names must be unique. Blank rows are
+ignored. Window indentation must be exactly four spaces, not tabs.
+
+=============================================================================
+COMMANDS                                                    *bosana-commands*
+
+:Bosana [options]         Open/reuse a view, preserving pending edits.
+    --manager            Exclude host and configure its exit lifecycle.
+    --exclude-host-session
+                         Exclude host without changing its options.
+    --socket-name NAME   Use tmux -L NAME.
+    --socket-path PATH   Use tmux -S PATH.
+
+:BosanaRefresh[!]         Refresh; bang discards unsaved edits.
+:BosanaClose[!]           Close; bang discards unsaved edits.
+
+=============================================================================
+CONFIGURATION                                               *bosana-configuration*
+>lua
+    require("bosana").setup({
+      tmux = "tmux",
+      timeout_ms = 5000,
+      -- socket_name = "work",
+      -- socket_path = "/tmp/work.sock",
+      exclude_host_session = false,
+      excluded_sessions = {}, -- Native session IDs, e.g. { "$1" }.
+      manager = false,
+      keymaps = {
+        ["q"] = "close",
+        ["<C-l>"] = "refresh",
+        ["g?"] = "help",
+      },
+    })
+<
+Setup is optional. Socket name/path are mutually exclusive. Without either,
+tmux inherits $TMUX or uses the default server. Mapping values are action names,
+functions, or false; keymaps=false disables all default mappings.
+
+=============================================================================
+LUA API                                                     *bosana-api*
+>lua
+    local bosana = require("bosana")
+    local bufnr, err = bosana.open({ manager = false })
+    local ok, err = bosana.save(bufnr)
+    local ok, err = bosana.refresh({ bufnr = bufnr, force = false })
+    local ok, err = bosana.close({ bufnr = bufnr, force = false })
+    local state = bosana.get_state(bufnr)
+<
+open() accepts per-view configuration overrides. Operations return a result or
+nil,error; setup() raises invalid configuration errors. Buffer arguments default
+to the current buffer. get_state() returns a copy of the baseline, blocked flag,
+buffer number, and last execution report, or nil outside a Bosana buffer.
+
+=============================================================================
+DEDICATED TMUX SESSION                                      *bosana-manager*
+
+Direct interactive startup: >sh
+    nvim -c 'Bosana'
+<
+Suggested tmux.conf hotkey: >
+    bind-key B new-session -A -s bosana -n manager \
+        'exec nvim -c "Bosana --manager"'
+<
+Prefix+B creates/switches to the manager session, or reuses it. --manager resolves
+the host by pane/session ID, excludes it from rendering and mutations, sets its
+detach-on-destroy=off, and sets its window's remain-on-exit=off. q quits Neovim in
+manager mode. Closing the final manager window removes its session; the client
+switches to a surviving session, or exits if there are none.
+
+--exclude-host-session only performs exclusion. Host detection requires $TMUX
+and $TMUX_PANE and verifies the selected server. The separate launcher script
+is deferred; the hotkey uses Neovim directly.
+
+=============================================================================
+RECOVERY                                                    *bosana-recovery*
+
+A fresh snapshot is compared to the baseline before a write. External structural
+changes, renames, indices, and server restarts require refresh; active-window
+selection does not. tmux commands are executed as argument arrays, with names
+escaped for tmux format expansion, rather than as shell command strings.
+
+Execution is not transactional. After a failed mutation, edited text is retained
+and writes are blocked until an explicit refresh. Inspect completed commands,
+the failed command, and the current operation using: >
+    :lua =require('bosana').get_state().last_report
+<
+After a failed transfer, temporary destination links are removed when the source
+still owns the window; cleanup attempts are recorded in the report. Completed
+transfers and deletions are not rolled back.
+
+Preserve needed edits (e.g. yank rows), then :BosanaRefresh!, inspect actual tmux
+state, and reapply remaining edits. A failed :wq stays in the modified editor.
+
+=============================================================================
+HEALTH CHECKS                                               *bosana-health*
+
+Run :checkhealth bosana (also available as :checkhealth Bosana).
+
+Checks Neovim 0.10+, configuration validity, the configured tmux executable and
+version, access to the selected server, unsupported server topology, and host
+exclusion when configured. This only reads tmux state; it does not change any
+sessions, windows, or options. No running sessions is an informational result.
+
+Before opening and before each tmux command, Bosana checks that the configured
+executable is available. If tmux is missing from PATH, an explicit error explains
+how to install it or configure an executable path: >lua
+    require("bosana").setup({ tmux = "/path/to/tmux" })
+<
+
+vim:tw=78:ts=8:ft=help:norl:

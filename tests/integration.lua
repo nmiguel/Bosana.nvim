@@ -1,0 +1,608 @@
+local t = require("tests.helpers")
+local bosana = require("bosana")
+local buffer = require("bosana.buffer")
+local model = require("bosana.model")
+local executor = require("bosana.executor")
+local planner = require("bosana.planner")
+
+local function open(path, opts)
+  local bufnr, err = bosana.open(vim.tbl_extend("force", { socket_path = path }, opts or {}))
+  return t.ok(bufnr, err)
+end
+
+local function child(path, edit, final_command)
+  local root = vim.fn.getcwd()
+  local argv = {
+    "nvim",
+    "--headless",
+    "-u",
+    "NONE",
+    "--cmd",
+    "lua vim.opt.runtimepath:prepend(" .. vim.inspect(root) .. ")",
+    "-c",
+    "runtime plugin/bosana.lua",
+    "-c",
+    "Bosana --socket-path " .. path,
+  }
+  if edit then
+    vim.list_extend(argv, { "-c", "lua " .. edit })
+  end
+  vim.list_extend(argv, { "-c", final_command })
+  return vim.system(argv, { text = true }):wait(15000)
+end
+
+t.test("real snapshots retain names, indices, and server identity", function()
+  local _, baseline = t.fixture()
+  t.eq(#baseline.sessions, 2)
+  t.eq(#baseline.sessions[1].windows, 3)
+  t.eq(baseline.sessions[1].windows[1].name, "a")
+  t.ok(baseline.server_id:match("^%d+\t"))
+end)
+
+t.test("real no-op writes execute no mutations", function()
+  local client, baseline = t.fixture()
+  local actual, report = t.apply(client, baseline, buffer.lines(baseline))
+  t.eq(report.completed, {})
+  t.ok(model.same(actual, baseline))
+end)
+
+t.test("real example 1: delete a session", function()
+  local client, baseline = t.fixture()
+  local first = baseline.sessions[1]
+  local lines = { t.session_line(first) }
+  for _, window in ipairs(first.windows) do
+    lines[#lines + 1] = t.window_line(window)
+  end
+  local actual = t.apply(client, baseline, lines)
+  t.eq(#actual.sessions, 1)
+  t.eq(actual.sessions[1].id, first.id)
+end)
+
+t.test("real example 2: transfer to the end of another session", function()
+  local client, baseline = t.fixture()
+  local lines = buffer.lines(baseline)
+  local moved = table.remove(lines, 6)
+  table.insert(lines, 5, moved)
+  local actual = t.apply(client, baseline, lines)
+  t.eq(actual.sessions[1].windows[4].id, baseline.sessions[2].windows[1].id)
+  t.eq(#actual.sessions[2].windows, 2)
+end)
+
+t.test("real example 3: move a window to the last position", function()
+  local client, baseline = t.fixture()
+  local lines = buffer.lines(baseline)
+  table.insert(lines, table.remove(lines, 6))
+  local actual = t.apply(client, baseline, lines)
+  t.eq(actual.sessions[2].windows[3].id, baseline.sessions[2].windows[1].id)
+end)
+
+t.test("real example 4: duplicate IDs cannot mutate tmux", function()
+  local client, baseline, path = t.fixture()
+  local bufnr = open(path)
+  local lines = buffer.lines(baseline)
+  table.insert(lines, 6, lines[6])
+  vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
+  local success, err = bosana.save()
+  t.eq(success, nil)
+  t.contains(err, "Duplicate ID")
+  t.ok(vim.bo[bufnr].modified)
+  t.ok(vim.bo[bufnr].modifiable)
+  t.ok(#vim.diagnostic.get(bufnr, { namespace = buffer.namespace }) > 0)
+  t.ok(model.same(t.ok(client:snapshot()), baseline))
+end)
+
+t.test("real example 5: delete an individual window", function()
+  local client, baseline = t.fixture()
+  local lines = buffer.lines(baseline)
+  local id = baseline.sessions[2].windows[1].id
+  table.remove(lines, 6)
+  local actual = t.apply(client, baseline, lines)
+  t.eq(actual.by_window[id], nil)
+  t.eq(#actual.sessions[2].windows, 2)
+end)
+
+t.test("exchange the last windows of two sessions without destroying either", function()
+  local client, baseline = t.fixture({ { "a" }, { "b" } })
+  local a, b = baseline.sessions[1], baseline.sessions[2]
+  local actual = t.apply(client, baseline, {
+    t.session_line(a),
+    t.window_line(b.windows[1]),
+    t.session_line(b),
+    t.window_line(a.windows[1]),
+  })
+  t.eq(actual.by_window[a.windows[1].id].session_id, b.id)
+  t.eq(actual.by_window[b.windows[1].id].session_id, a.id)
+  t.eq(#actual.sessions, 2)
+end)
+
+t.test("preserve moved-out windows when their source session is deleted", function()
+  local client, baseline = t.fixture()
+  local first, second = baseline.sessions[1], baseline.sessions[2]
+  local lines =
+    { t.session_line(first), t.window_line(first.windows[1]), t.window_line(second.windows[1]) }
+  local actual = t.apply(client, baseline, lines)
+  t.eq(#actual.sessions, 1)
+  t.eq(#actual.sessions[1].windows, 2)
+  t.eq(actual.by_window[second.windows[1].id].session_id, first.id)
+end)
+
+t.test("move all windows out and tolerate automatic source-session destruction", function()
+  local client, baseline = t.fixture({ { "a" }, { "b", "c" } })
+  local first, second = baseline.sessions[1], baseline.sessions[2]
+  local actual = t.apply(client, baseline, {
+    t.session_line(first),
+    t.window_line(second.windows[2]),
+    t.window_line(first.windows[1]),
+    t.window_line(second.windows[1]),
+    t.session_line(second), -- Empty header means delete.
+  })
+  t.eq(#actual.sessions, 1)
+  t.eq(
+    model.window_ids(actual.sessions[1]),
+    { second.windows[2].id, first.windows[1].id, second.windows[1].id }
+  )
+end)
+
+t.test("a blank buffer deletes all sessions and handles the vanished server", function()
+  local client, baseline = t.fixture()
+  local actual = t.apply(client, baseline, { "" })
+  t.eq(actual.sessions, {})
+  t.eq(actual.server_id, false)
+end)
+
+t.test("rename swaps and deleted-session name reuse", function()
+  local client, baseline = t.fixture()
+  local lines = buffer.lines(baseline)
+  lines[1], lines[5] =
+    t.session_line(baseline.sessions[1], "session2"),
+    t.session_line(baseline.sessions[2], "session1")
+  local actual = t.apply(client, baseline, lines)
+  t.eq(actual.by_session[baseline.sessions[1].id].name, "session2")
+  t.eq(actual.by_session[baseline.sessions[2].id].name, "session1")
+  local first = actual.sessions[1]
+  local renamed =
+    t.apply(client, actual, { t.session_line(first, "session1"), t.window_line(first.windows[1]) })
+  t.eq(renamed.sessions[1].name, "session1")
+end)
+
+t.test("Unicode and shell punctuation stay literal in window names", function()
+  local client, baseline = t.fixture()
+  local marker = "/tmp/opencode/bosana-injection-" .. vim.fn.getpid()
+  local name = "λ 日本語 ; $(touch "
+    .. marker
+    .. ") #(touch "
+    .. marker
+    .. ') #{pane_title} # "quotes" \\ end'
+  local lines = buffer.lines(baseline)
+  lines[2], lines[3] =
+    t.window_line(baseline.sessions[1].windows[1], name),
+    t.window_line(baseline.sessions[1].windows[2], name)
+  local actual = t.apply(client, baseline, lines)
+  t.eq(actual.sessions[1].windows[1].name, name)
+  t.eq(actual.sessions[1].windows[2].name, name)
+  t.eq(vim.fn.filereadable(marker), 0)
+end)
+
+t.test("reordering preserves nonzero indices and gaps", function()
+  local client, baseline = t.fixture({ { "a", "b", "c" } })
+  local session = baseline.sessions[1]
+  for i, index in ipairs({ 3, 7, 12 }) do
+    t.ok(client:run({
+      "move-window",
+      "-s",
+      session.id .. ":" .. session.windows[i].id,
+      "-t",
+      session.id .. ":" .. index,
+    }))
+  end
+  baseline = t.ok(client:snapshot())
+  session = baseline.sessions[1]
+  local actual = t.apply(client, baseline, {
+    t.session_line(session),
+    t.window_line(session.windows[3]),
+    t.window_line(session.windows[1]),
+    t.window_line(session.windows[2]),
+  })
+  t.eq(
+    vim.tbl_map(function(window)
+      return window.index
+    end, actual.sessions[1].windows),
+    { 3, 7, 12 }
+  )
+end)
+
+t.test("transfers and deletions work with automatic renumbering and base-index one", function()
+  local client, baseline = t.fixture()
+  t.ok(client:run({ "set-option", "-g", "base-index", "1" }))
+  t.ok(client:run({ "set-option", "-g", "renumber-windows", "on" }))
+  for _, session in ipairs(baseline.sessions) do
+    t.ok(client:run({ "move-window", "-r", "-t", session.id }))
+  end
+  baseline = t.ok(client:snapshot())
+  local a, b = baseline.sessions[1], baseline.sessions[2]
+  local actual = t.apply(client, baseline, {
+    t.session_line(a),
+    t.window_line(a.windows[3]),
+    t.window_line(b.windows[1]),
+    t.window_line(a.windows[1]),
+    t.session_line(b),
+    t.window_line(b.windows[3]),
+    t.window_line(b.windows[2]),
+  })
+  t.eq(actual.sessions[1].windows[1].index, 1)
+  t.eq(actual.sessions[2].windows[1].index, 1)
+  t.eq(actual.by_window[a.windows[2].id], nil)
+end)
+
+t.test("active window identity survives reordering", function()
+  local client, baseline = t.fixture({ { "a", "b", "c" } })
+  local session = baseline.sessions[1]
+  local id = session.windows[2].id
+  t.ok(client:run({ "select-window", "-t", session.id .. ":" .. id }))
+  -- Navigation after opening must not invalidate the baseline.
+  local actual = t.apply(client, baseline, {
+    t.session_line(session),
+    t.window_line(session.windows[2]),
+    t.window_line(session.windows[3]),
+    t.window_line(session.windows[1]),
+  })
+  t.eq(actual.by_window[id].active, true)
+end)
+
+t.test("stale names reject the entire write before any mutations", function()
+  local client, baseline = t.fixture()
+  local desired = t.parse(buffer.lines(baseline), baseline)
+  t.ok(client:run({
+    "rename-window",
+    "-t",
+    baseline.sessions[1].id .. ":" .. baseline.sessions[1].windows[1].id,
+    "external",
+  }))
+  local actual, err, report =
+    executor.execute(client, baseline, desired, planner.plan(baseline, desired))
+  t.eq(actual, nil)
+  t.contains(err, "state changed")
+  t.eq(report.completed, {})
+  t.eq(report.attempted, false)
+end)
+
+t.test("a restarted server is stale even when native IDs are reused", function()
+  local client, baseline = t.fixture({ { "a" } })
+  t.ok(client:run({ "kill-server" }))
+  t.ok(
+    client:run({ "-f", "/dev/null", "new-session", "-d", "-s", "session1", "-n", "a", "sleep 3600" })
+  )
+  local current = t.ok(client:snapshot())
+  t.eq(current.sessions[1].id, baseline.sessions[1].id)
+  local actual, err =
+    executor.execute(client, baseline, t.parse(buffer.lines(baseline), baseline), {})
+  t.eq(actual, nil)
+  t.contains(err, "state changed")
+end)
+
+t.test("linked windows are rejected before editing", function()
+  local client, baseline = t.fixture()
+  local first, second = baseline.sessions[1], baseline.sessions[2]
+  t.ok(client:run({
+    "link-window",
+    "-d",
+    "-s",
+    first.id .. ":" .. first.windows[1].id,
+    "-t",
+    second.id .. ":9",
+  }))
+  local snapshot, err = client:snapshot()
+  t.eq(snapshot, nil)
+  t.contains(err, "Linked/shared")
+end)
+
+t.test("grouped sessions are rejected before editing", function()
+  local client, baseline = t.fixture({ { "a" } })
+  t.ok(client:run({ "new-session", "-d", "-s", "grouped", "-t", baseline.sessions[1].id }))
+  local snapshot, err = client:snapshot()
+  t.eq(snapshot, nil)
+  t.contains(err, "Grouped sessions")
+end)
+
+t.test("excluded sessions survive deletion of all visible sessions", function()
+  local client, baseline, path = t.fixture()
+  local excluded = baseline.sessions[2]
+  local bufnr = open(path, { excluded_sessions = { excluded.id } })
+  t.eq(#vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), 4)
+  vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, { "" })
+  t.ok(bosana.save())
+  local actual = t.ok(client:snapshot())
+  t.eq(#actual.sessions, 1)
+  t.eq(actual.sessions[1].id, excluded.id)
+  t.eq(model.window_ids(actual.sessions[1]), model.window_ids(excluded))
+end)
+
+t.test("manager mode resolves the host by pane ID and configures its lifecycle", function()
+  local client, baseline, path = t.fixture({ { "work" }, { "manager" } })
+  local host = baseline.sessions[2]
+  local pane = t.ok(client:display(host.id .. ":" .. host.windows[1].id, "#{pane_id}"))
+  local original_pane, original_tmux = vim.env.TMUX_PANE, vim.env.TMUX
+  vim.env.TMUX_PANE = pane
+  vim.env.TMUX = path .. "," .. baseline.server_id:match("^(%d+)") .. ",0"
+  local ok, err = xpcall(function()
+    local bufnr = open(path, { manager = true })
+    t.eq(#vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), 2)
+    t.eq(t.ok(client:run({ "show-options", "-v", "-t", host.id, "detach-on-destroy" })), "off\n")
+    t.eq(
+      t.ok(client:run({
+        "show-options",
+        "-w",
+        "-v",
+        "-t",
+        host.id .. ":" .. host.windows[1].id,
+        "remain-on-exit",
+      })),
+      "off\n"
+    )
+    t.eq(bosana.get_state().baseline.excluded[host.id], true)
+  end, debug.traceback)
+  vim.env.TMUX_PANE = original_pane
+  vim.env.TMUX = original_tmux
+  t.ok(ok, err)
+end)
+
+t.test("host exclusion outside tmux returns a useful error", function()
+  local original = vim.env.TMUX_PANE
+  vim.env.TMUX_PANE = nil
+  local bufnr, err = bosana.open({ exclude_host_session = true })
+  vim.env.TMUX_PANE = original
+  t.eq(bufnr, nil)
+  t.contains(err, "inside a tmux pane")
+end)
+
+t.test("partial failure preserves edits, reports completed commands, and blocks replay", function()
+  local client, baseline = t.fixture({ { "a" } })
+  local original_run, count = client.run, 0
+  client.run = function(self, args)
+    if args[1] == "rename-session" then
+      count = count + 1
+      if count == 2 then
+        return nil, "injected failure"
+      end
+    end
+    return original_run(self, args)
+  end
+  local bufnr = buffer.create(client, baseline, { keymaps = false }, "failure-test")
+  local lines = buffer.lines(baseline)
+  lines[1] = t.session_line(baseline.sessions[1], "renamed")
+  vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
+  local success, err = bosana.save()
+  t.eq(success, nil)
+  t.contains(err, "injected failure")
+  t.eq(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), lines)
+  t.ok(vim.bo[bufnr].modified)
+  t.ok(vim.bo[bufnr].modifiable)
+  local state = bosana.get_state()
+  t.eq(state.blocked, true)
+  t.eq(#state.last_report.completed, 1)
+  t.eq(state.last_report.failed[1], "rename-session")
+  success, err = bosana.save()
+  t.eq(success, nil)
+  t.contains(err, "Previous write partly failed")
+  t.eq(count, 2)
+  t.ok(bosana.refresh({ force = true }))
+  t.eq(bosana.get_state().blocked, false)
+end)
+
+t.test("concealed IDs survive linewise cut/paste and undo", function()
+  local _, baseline, path = t.fixture()
+  local bufnr = open(path)
+  t.eq(vim.bo[bufnr].buftype, "acwrite")
+  t.eq(vim.wo.conceallevel, 3)
+  t.eq(vim.fn.synconcealed(1, 1)[1], 1)
+  local original = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+  vim.cmd("normal! 2GddGp")
+  local edited = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+  t.eq(edited[#edited], original[2])
+  t.eq(
+    t.parse(edited, baseline).by_window[baseline.sessions[1].windows[1].id].session_id,
+    baseline.sessions[2].id
+  )
+  vim.cmd("normal! u")
+  t.eq(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), original)
+end)
+
+t.test(":w applies edits, refreshes the baseline, and resets undo", function()
+  local client, baseline, path = t.fixture()
+  local bufnr = open(path)
+  local lines = buffer.lines(baseline)
+  lines[2] = t.window_line(baseline.sessions[1].windows[1], "written")
+  vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
+  vim.cmd("write")
+  t.eq(vim.bo[bufnr].modified, false)
+  t.eq(t.ok(client:snapshot()).sessions[1].windows[1].name, "written")
+  t.eq(bosana.get_state().baseline.sessions[1].windows[1].name, "written")
+  vim.cmd("normal! u")
+  t.eq(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), lines)
+end)
+
+t.test("refresh refuses unsaved edits and bang explicitly discards them", function()
+  local _, baseline, path = t.fixture()
+  local bufnr = open(path)
+  local original = buffer.lines(baseline)
+  vim.api.nvim_buf_set_lines(
+    bufnr,
+    1,
+    2,
+    false,
+    { t.window_line(baseline.sessions[1].windows[1], "pending") }
+  )
+  local success, err = bosana.refresh()
+  t.eq(success, nil)
+  t.contains(err, "Unsaved edits")
+  vim.cmd("BosanaRefresh!")
+  t.eq(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), original)
+  t.eq(vim.bo[bufnr].modified, false)
+end)
+
+t.test("opening the same view preserves pending edits", function()
+  local _, baseline, path = t.fixture()
+  local bufnr = open(path)
+  vim.api.nvim_buf_set_lines(
+    bufnr,
+    1,
+    2,
+    false,
+    { t.window_line(baseline.sessions[1].windows[1], "pending") }
+  )
+  t.eq(open(path), bufnr)
+  t.eq(
+    vim.api.nvim_buf_get_lines(bufnr, 1, 2, false)[1],
+    t.window_line(baseline.sessions[1].windows[1], "pending")
+  )
+end)
+
+t.test("direct startup and :wq complete mutations before exiting", function()
+  local client, baseline, path = t.fixture({ { "a" } })
+  local line = t.window_line(baseline.sessions[1].windows[1], "saved-before-exit")
+  local result =
+    child(path, "vim.api.nvim_buf_set_lines(0, 1, 2, false, { " .. vim.inspect(line) .. " })", "wq")
+  t.eq(result.code, 0, result.stderr)
+  t.eq(t.ok(client:snapshot()).sessions[1].windows[1].name, "saved-before-exit")
+end)
+
+t.test("failed :wq stays in the modified editor", function()
+  local client, baseline, path = t.fixture({ { "a" } })
+  local line = t.window_line(baseline.sessions[1].windows[1])
+  local result = child(
+    path,
+    "vim.api.nvim_buf_set_lines(0, 2, 2, false, { " .. vim.inspect(line) .. " })",
+    [[lua local ok = pcall(vim.cmd, 'wq'); assert(not ok); assert(vim.bo.modified); print('WRITE_BLOCKED'); vim.cmd('qa!')]]
+  )
+  t.eq(result.code, 0, result.stderr)
+  t.contains(result.stderr, "WRITE_BLOCKED")
+  t.ok(model.same(t.ok(client:snapshot()), baseline))
+end)
+
+t.test(":q! discards edits without changing tmux", function()
+  local client, baseline, path = t.fixture({ { "a" } })
+  local result = child(path, [[vim.api.nvim_buf_set_lines(0, 0, -1, false, { '' })]], "q!")
+  t.eq(result.code, 0, result.stderr)
+  t.ok(model.same(t.ok(client:snapshot()), baseline))
+end)
+
+t.test("invalid command arguments and socket configuration are rejected", function()
+  local bufnr, err = bosana.command({ "--socket-path" })
+  t.eq(bufnr, nil)
+  t.contains(err, "Missing value")
+  bufnr, err = bosana.command({ "--unknown" })
+  t.eq(bufnr, nil)
+  t.contains(err, "Unknown")
+  bufnr, err = bosana.open({ socket_name = "one", socket_path = "/tmp/two" })
+  t.eq(bufnr, nil)
+  t.contains(err, "either")
+  bufnr, err = bosana.open({ keymaps = { q = 123 } })
+  t.eq(bufnr, nil)
+  t.contains(err, "Keymap actions")
+end)
+
+t.test("literal session names and leading dashes survive renaming", function()
+  local client, baseline = t.fixture({ { "a" } })
+  local name = "-work\\dir #{window_name} ## literal"
+  local window = "-window #{session_name} ## literal"
+  local actual = t.apply(client, baseline, {
+    t.session_line(baseline.sessions[1], name),
+    t.window_line(baseline.sessions[1].windows[1], window),
+  })
+  t.eq(actual.sessions[1].name, name)
+  t.eq(actual.sessions[1].windows[1].name, window)
+end)
+
+t.test("host detection rejects another server with reused pane IDs", function()
+  local host_client, baseline, host_path = t.fixture({ { "host" } })
+  local _, _, other_path = t.fixture({ { "other" } })
+  local original_tmux, original_pane = vim.env.TMUX, vim.env.TMUX_PANE
+  vim.env.TMUX = host_path .. "," .. baseline.server_id:match("^(%d+)") .. ",0"
+  vim.env.TMUX_PANE = t.ok(host_client:display(baseline.sessions[1].id .. ":", "#{pane_id}"))
+  local bufnr, err = bosana.open({ socket_path = other_path, exclude_host_session = true })
+  vim.env.TMUX, vim.env.TMUX_PANE = original_tmux, original_pane
+  t.eq(bufnr, nil)
+  t.contains(err, "not the server hosting")
+end)
+
+t.test("closing restores the original buffer and window options", function()
+  local _, _, path = t.fixture()
+  local previous = vim.api.nvim_get_current_buf()
+  vim.wo.wrap, vim.wo.conceallevel, vim.wo.concealcursor = true, 0, ""
+  open(path)
+  t.eq(vim.wo.wrap, false)
+  t.eq(vim.wo.conceallevel, 3)
+  t.ok(bosana.close())
+  t.eq(vim.api.nvim_get_current_buf(), previous)
+  t.eq(vim.wo.wrap, true)
+  t.eq(vim.wo.conceallevel, 0)
+  t.eq(vim.wo.concealcursor, "")
+end)
+
+t.test("failed transfers remove temporary links without destroying windows", function()
+  local client, baseline = t.fixture({ { "a" }, { "b" } })
+  local first, second = baseline.sessions[1], baseline.sessions[2]
+  local desired = t.parse({
+    t.session_line(first),
+    t.window_line(second.windows[1]),
+    t.session_line(second),
+    t.window_line(first.windows[1]),
+  }, baseline)
+  local original_run, count = client.run, 0
+  client.run = function(self, args)
+    if args[1] == "unlink-window" then
+      count = count + 1
+      if count == 1 then
+        return nil, "injected transfer failure"
+      end
+    end
+    return original_run(self, args)
+  end
+  local actual, err, report =
+    executor.execute(client, baseline, desired, planner.plan(baseline, desired))
+  t.eq(actual, nil)
+  t.contains(err, "injected transfer failure")
+  t.eq(#report.cleanup, 2)
+  t.eq(report.cleanup[1].error, nil)
+  t.ok(model.same(t.ok(client:snapshot()), baseline))
+end)
+
+t.test("real manager startup inherits its tmux server and cleans up on exit", function()
+  local client, baseline = t.fixture({ { "work" } })
+  local root = vim.fn.getcwd()
+  local verify =
+    [[local b=require('bosana'); local s=b.get_state(); assert(s); assert(#vim.api.nvim_buf_get_lines(0,0,-1,false)==2); assert(next(s.baseline.excluded)); assert(vim.system({'tmux','set-option','-g','@bosana-started','yes'}):wait().code==0)]]
+  t.ok(client:run({
+    "new-session",
+    "-d",
+    "-s",
+    "bosana",
+    "-n",
+    "manager",
+    "nvim",
+    "--headless",
+    "-u",
+    "NONE",
+    "--cmd",
+    "lua vim.opt.runtimepath:prepend(" .. vim.inspect(root) .. ")",
+    "-c",
+    "runtime plugin/bosana.lua",
+    "-c",
+    "Bosana --manager",
+    "-c",
+    "lua " .. verify,
+    "-c",
+    "wq",
+  }))
+  t.ok(
+    vim.wait(15000, function()
+      local marker = client:run({ "show-options", "-gv", "@bosana-started" })
+      local host = client:run({ "has-session", "-t", "=bosana" })
+      return marker == "yes\n" and host == nil
+    end, 50),
+    "Manager did not start and clean up"
+  )
+  local actual = t.ok(client:snapshot())
+  t.eq(#actual.sessions, 1)
+  t.eq(actual.sessions[1].id, baseline.sessions[1].id)
+end)
