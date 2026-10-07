@@ -703,6 +703,64 @@ t.test("opening the same view preserves pending edits", function()
   )
 end)
 
+t.test("scheduled startup opens with colliding session-restored buffer names", function()
+  local _, _, path = t.fixture({ { "a" } })
+  local script = string.format(
+    [[
+    local restored = { vim.api.nvim_get_current_buf(), vim.api.nvim_create_buf(true, false) }
+    local names = { 'bosana://' .. (restored[2] + 1), 'bosana://' .. (restored[2] + 2) }
+    for i, bufnr in ipairs(restored) do
+      vim.api.nvim_buf_set_name(bufnr, names[i])
+      vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, { 'restored edits ' .. i })
+      vim.bo[bufnr].modified = false
+    end
+    vim.api.nvim_create_autocmd('VimEnter', {
+      once = true,
+      callback = function()
+        vim.schedule(function()
+          local ok, err = xpcall(function()
+            vim.cmd('Bosana --socket-path ' .. %s)
+            local bosana = require('bosana')
+            local bufnr = vim.api.nvim_get_current_buf()
+            assert(bosana.get_state(bufnr))
+            local name = vim.api.nvim_buf_get_name(bufnr)
+            assert(name ~= names[1] and name ~= names[2])
+            assert(bosana.open({ socket_path = %s }) == bufnr)
+            assert(bosana.close())
+            for i, restored_bufnr in ipairs(restored) do
+              assert(vim.api.nvim_buf_get_name(restored_bufnr) == names[i])
+              assert(vim.api.nvim_buf_get_lines(restored_bufnr, 0, -1, false)[1] == 'restored edits ' .. i)
+            end
+          end, debug.traceback)
+          if not ok then
+            print(err)
+            vim.cmd('cquit 1')
+          end
+          vim.cmd('qa!')
+        end)
+      end,
+    })
+  ]],
+    vim.inspect(path),
+    vim.inspect(path)
+  )
+  local result = vim
+    .system({
+      "nvim",
+      "--headless",
+      "-u",
+      "NONE",
+      "--cmd",
+      "lua vim.opt.runtimepath:prepend(" .. vim.inspect(vim.fn.getcwd()) .. ")",
+      "-c",
+      "runtime plugin/bosana.lua",
+      "-c",
+      "lua " .. script,
+    }, { text = true })
+    :wait(15000)
+  t.eq(result.code, 0, result.stderr)
+end)
+
 t.test("direct startup and :wq complete mutations before exiting", function()
   local client, baseline, path = t.fixture({ { "a" } })
   local line = t.window_line(baseline.sessions[1].windows[1], "saved-before-exit")

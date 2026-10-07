@@ -324,7 +324,12 @@ function M.create(client, snapshot, options, key)
   states[bufnr] = state
   -- Name-change handlers should see a special buffer, not a regular file.
   mark_special(bufnr)
-  vim.api.nvim_buf_set_name(bufnr, "bosana://" .. bufnr)
+  -- Session restoration can retain a URI whose number is now this buffer's ID.
+  local name_id = bufnr
+  while vim.fn.bufnr("bosana://" .. name_id) ~= -1 do
+    name_id = name_id + 1
+  end
+  vim.api.nvim_buf_set_name(bufnr, "bosana://" .. name_id)
   vim.bo[bufnr].bufhidden = "hide"
   vim.bo[bufnr].swapfile = false
   vim.bo[bufnr].undofile = false
