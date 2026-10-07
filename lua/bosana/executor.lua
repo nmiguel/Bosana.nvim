@@ -1,7 +1,7 @@
 local model = require("bosana.model")
 local M = {}
 
-function M.execute(client, baseline, desired, operations)
+function M.execute(client, baseline, desired, operations, before_execute)
   local report = { completed = {}, attempted = false }
   local current, snapshot_err = client:snapshot(baseline.excluded)
   if not current then
@@ -9,6 +9,22 @@ function M.execute(client, baseline, desired, operations)
   end
   if not model.same(current, baseline) then
     return nil, "tmux state changed since opening the buffer; refresh before saving", report
+  end
+
+  if #operations > 0 and before_execute then
+    local ok, approved = pcall(before_execute)
+    if not ok or not approved then
+      report.cancelled = true
+      return nil, ok and "Write cancelled" or tostring(approved), report
+    end
+    -- The confirmation waits for input; tmux may have changed in the meantime.
+    current, snapshot_err = client:snapshot(baseline.excluded)
+    if not current then
+      return nil, snapshot_err, report
+    end
+    if not model.same(current, baseline) then
+      return nil, "tmux state changed while confirming changes; refresh before saving", report
+    end
   end
 
   local function command(args)

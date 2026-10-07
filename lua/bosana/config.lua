@@ -7,6 +7,8 @@ M.defaults = {
   exclude_host_session = false,
   excluded_sessions = {}, -- Native session IDs, e.g. { "$1" }.
   manager = false,
+  icons = { session = "▣", window = "▤" },
+  confirm = true,
   keymaps = {
     ["q"] = "close",
     ["<C-l>"] = "refresh",
@@ -33,9 +35,22 @@ function M.validate(opts)
   if type(opts.timeout_ms) ~= "number" or opts.timeout_ms <= 0 then
     error("timeout_ms must be positive", 0)
   end
-  for _, key in ipairs({ "exclude_host_session", "manager" }) do
+  for _, key in ipairs({ "exclude_host_session", "manager", "confirm" }) do
     if type(opts[key]) ~= "boolean" then
       error(key .. " must be a boolean", 0)
+    end
+  end
+  if opts.icons ~= false then
+    if type(opts.icons) ~= "table" then
+      error("icons must be a table or false", 0)
+    end
+    for key, icon in pairs(opts.icons) do
+      if key ~= "session" and key ~= "window" then
+        error("Unknown Bosana icon: " .. tostring(key), 0)
+      end
+      if type(icon) ~= "string" or icon:find("[%c]") then
+        error("icons." .. key .. " must be a string without control characters", 0)
+      end
     end
   end
   if type(opts.excluded_sessions) ~= "table" then

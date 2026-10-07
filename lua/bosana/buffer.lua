@@ -1,9 +1,12 @@
 local parser = require("bosana.parser")
 local planner = require("bosana.planner")
 local executor = require("bosana.executor")
+local confirmation = require("bosana.confirmation")
+local message = require("bosana.message")
 local M = {}
 local states = {}
 local namespace = vim.api.nvim_create_namespace("bosana")
+local icon_namespace = vim.api.nvim_create_namespace("bosana.icons")
 local writing = false
 
 function M.lines(snapshot)
@@ -52,6 +55,55 @@ local function name_column(line)
   return #prefix + (line:sub(2, 2) == "@" and 4 or 0)
 end
 
+local function render_icons(state)
+  local bufnr = state.bufnr
+  vim.api.nvim_buf_clear_namespace(bufnr, icon_namespace, 0, -1)
+  if not state.options.icons then
+    return
+  end
+  for row, line in ipairs(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)) do
+    local kind = line:match("^/([%$@])%d+ ")
+    local icon = kind and state.options.icons[kind == "$" and "session" or "window"]
+    if icon and icon ~= "" and name_column(line) < #line then
+      vim.api.nvim_buf_set_extmark(bufnr, icon_namespace, row - 1, name_column(line), {
+        virt_text = { { icon .. " ", kind == "$" and "BosanaSessionIcon" or "BosanaWindowIcon" } },
+        virt_text_pos = "inline",
+      })
+    end
+  end
+end
+
+local function attach_icons(state)
+  if state.attached then
+    return
+  end
+  state.attached = vim.api.nvim_buf_attach(state.bufnr, false, {
+    on_lines = function()
+      if not state.icons_pending then
+        state.icons_pending = true
+        -- Undo adjusts extmarks after on_lines. Rebuild once that has finished.
+        vim.schedule(function()
+          state.icons_pending = false
+          if states[state.bufnr] == state and vim.api.nvim_buf_is_loaded(state.bufnr) then
+            render_icons(state)
+          end
+        end)
+      end
+    end,
+    on_detach = function()
+      state.attached = false
+    end,
+  })
+end
+
+local function load_syntax(bufnr)
+  vim.api.nvim_buf_call(bufnr, function()
+    -- Reloading clears syntax matches but can leave b:current_syntax intact.
+    vim.b[bufnr].current_syntax = nil
+    vim.cmd("runtime! syntax/bosana.vim")
+  end)
+end
+
 local function constrain(bufnr)
   if vim.api.nvim_get_current_buf() ~= bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
     return
@@ -93,6 +145,11 @@ local function restore_window_options(state, win)
   state.saved_windows[win] = nil
 end
 
+local function mark_special(bufnr)
+  vim.bo[bufnr].buftype = "acwrite"
+  vim.bo[bufnr].buflisted = false
+end
+
 local function render(state, snapshot)
   local bufnr = state.bufnr
   local cursors = {}
@@ -106,6 +163,7 @@ local function render(state, snapshot)
   vim.bo[bufnr].modifiable = true
   vim.bo[bufnr].undolevels = -1
   vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
+  render_icons(state)
   vim.bo[bufnr].undolevels = undo
   vim.bo[bufnr].modified = false
   state.baseline, state.blocked = snapshot, false
@@ -124,6 +182,21 @@ local function render(state, snapshot)
   end
 end
 
+local function recover(state)
+  local blocked = state.blocked
+  local ok, snapshot, err = pcall(state.client.snapshot, state.client, state.baseline.excluded)
+  if not ok or not snapshot then
+    if state.last_report then
+      state.last_report.recovery_error = ok and err or tostring(snapshot)
+    end
+    -- If tmux is unavailable, at least remove invalid/stale edits from the view.
+    render(state, state.baseline)
+    state.blocked = blocked
+    return
+  end
+  render(state, snapshot)
+end
+
 function M.save(bufnr)
   local state = M.get(bufnr)
   if not state then
@@ -137,43 +210,56 @@ function M.save(bufnr)
       "Previous write partly failed; preserve any edits you need, then use :BosanaRefresh! before retrying"
   end
   writing = true
+  state.last_report = nil
   vim.bo[state.bufnr].modifiable = false
   local ok, result, err = pcall(function()
     local desired, errors =
       parser.parse(vim.api.nvim_buf_get_lines(state.bufnr, 0, -1, false), state.baseline)
     vim.diagnostic.reset(namespace, state.bufnr)
     if not desired then
-      vim.diagnostic.set(namespace, state.bufnr, errors)
-      if vim.api.nvim_get_current_buf() == state.bufnr then
-        vim.api.nvim_win_set_cursor(0, { errors[1].lnum + 1, errors[1].col })
-      end
+      state.last_report = { completed = {}, attempted = false, validation = errors }
       return nil, "Invalid edits: " .. errors[1].message
     end
     local operations = planner.plan(state.baseline, desired)
+    local before_execute
+    if state.options.confirm ~= false then
+      before_execute = function()
+        return confirmation.confirm(state.baseline, desired)
+      end
+    end
     local actual, execution_err, report =
-      executor.execute(state.client, state.baseline, desired, operations)
+      executor.execute(state.client, state.baseline, desired, operations, before_execute)
     state.last_report = report
     if not actual then
       state.blocked = report.attempted
-      local detail = state.blocked
-          and (" (" .. #report.completed .. " commands completed; :BosanaRefresh! required)")
-        or ""
-      return nil, execution_err .. detail
+      report.message = execution_err
+      return nil, execution_err
     end
     render(state, actual)
     return true
   end)
+  if not ok then
+    state.blocked = true
+    state.last_report = state.last_report or { completed = {}, attempted = true }
+    state.last_report.message = tostring(result)
+  end
+  local cancelled = state.last_report and state.last_report.cancelled
+  if (not ok or not result) and not cancelled then
+    local recovered, recovery_err = pcall(recover, state)
+    if not recovered then
+      state.blocked = true
+      state.last_report.recovery_error = tostring(recovery_err)
+      vim.bo[state.bufnr].modified = true
+    end
+  end
   writing = false
   if vim.api.nvim_buf_is_valid(state.bufnr) then
     vim.bo[state.bufnr].modifiable = true
-    if not ok or not result then
+    if cancelled then
       vim.bo[state.bufnr].modified = true
     end
   end
   if not ok then
-    -- Unexpected exceptions may have happened after a mutation. Require an
-    -- explicit refresh rather than replaying a possibly half-completed plan.
-    state.blocked = true
     return nil, tostring(result)
   end
   return result, err
@@ -236,8 +322,9 @@ function M.create(client, snapshot, options, key)
     saved_windows = {},
   }
   states[bufnr] = state
+  -- Name-change handlers should see a special buffer, not a regular file.
+  mark_special(bufnr)
   vim.api.nvim_buf_set_name(bufnr, "bosana://" .. bufnr)
-  vim.bo[bufnr].buftype = "acwrite"
   vim.bo[bufnr].bufhidden = "hide"
   vim.bo[bufnr].swapfile = false
   vim.bo[bufnr].undofile = false
@@ -252,22 +339,71 @@ function M.create(client, snapshot, options, key)
   vim.bo[bufnr].formatoptions = ""
   vim.b[bufnr].EditorConfig_disable = true
 
+  vim.api.nvim_set_hl(0, "BosanaSessionIcon", { default = true, link = "Title" })
+  vim.api.nvim_set_hl(0, "BosanaWindowIcon", { default = true, link = "Special" })
+  attach_icons(state)
+
   local group = vim.api.nvim_create_augroup("BosanaBuffer" .. bufnr, { clear = true })
   vim.api.nvim_create_autocmd("BufWriteCmd", {
     group = group,
     buffer = bufnr,
     callback = function()
-      local success, err = M.save(bufnr)
+      local success = M.save(bufnr)
       if not success then
-        -- Raising an error from BufWriteCmd keeps :wq from exiting.
-        error("Bosana: " .. err, 0)
+        local cancelled = state.last_report and state.last_report.cancelled
+        message.error(cancelled and "Write cancelled." or "Could not save changes.")
       end
+    end,
+  })
+  vim.api.nvim_create_autocmd("BufReadCmd", {
+    group = group,
+    buffer = bufnr,
+    callback = function()
+      -- :edit can relist the buffer while reloading it.
+      mark_special(bufnr)
+      local reload = state.reload
+      state.reload = nil
+      if reload then
+        -- Neovim unloads and empties the buffer before BufReadCmd. Restore it
+        -- first so failed reads retain edits and render can follow stable IDs.
+        vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, reload.lines)
+        vim.bo[bufnr].modified = reload.modified
+        for win, cursor in pairs(reload.cursors) do
+          if vim.api.nvim_win_is_valid(win) and vim.api.nvim_win_get_buf(win) == bufnr then
+            vim.api.nvim_win_set_cursor(win, cursor)
+          end
+        end
+      end
+      attach_icons(state)
+      render_icons(state)
+      load_syntax(bufnr)
+      -- :edit performs its unsaved-buffer check before invoking BufReadCmd.
+      local success = M.refresh(bufnr, true)
+      if not success then
+        message.error("Could not refresh tmux sessions.")
+      end
+    end,
+  })
+  vim.api.nvim_create_autocmd("BufUnload", {
+    group = group,
+    buffer = bufnr,
+    callback = function()
+      local cursors = {}
+      for _, win in ipairs(windows_for(bufnr)) do
+        cursors[win] = vim.api.nvim_win_get_cursor(win)
+      end
+      state.reload = {
+        lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false),
+        modified = vim.bo[bufnr].modified,
+        cursors = cursors,
+      }
     end,
   })
   vim.api.nvim_create_autocmd("BufWinEnter", {
     group = group,
     buffer = bufnr,
     callback = function()
+      mark_special(bufnr)
       set_window_options(state, vim.api.nvim_get_current_win())
       constrain(bufnr)
     end,
@@ -310,11 +446,17 @@ function M.create(client, snapshot, options, key)
             else
               local fn = M[action]
               if not fn then
-                error("Unknown Bosana action: " .. action, 0)
+                message.error("Unknown action.")
+                return
               end
-              local success, err = fn(bufnr)
+              local success = fn(bufnr)
               if not success then
-                vim.notify("Bosana: " .. err, vim.log.levels.ERROR)
+                local messages = {
+                  save = "Could not save changes.",
+                  refresh = "Could not refresh tmux sessions.",
+                  close = "Could not close the buffer.",
+                }
+                message.error(messages[action] or "Could not complete the action.")
               end
             end
           end
@@ -331,9 +473,7 @@ function M.create(client, snapshot, options, key)
   render(state, snapshot)
   vim.api.nvim_set_current_buf(bufnr)
   -- Load concealment even when the user's config has not enabled :syntax.
-  vim.api.nvim_buf_call(bufnr, function()
-    vim.cmd("runtime! syntax/bosana.vim")
-  end)
+  load_syntax(bufnr)
   set_window_options(state, vim.api.nvim_get_current_win())
   constrain(bufnr)
   return bufnr

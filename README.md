@@ -4,15 +4,16 @@ Edit tmux sessions and windows as a normal Neovim buffer, inspired by
 [Oil](https://github.com/stevearc/oil.nvim).
 
 ```text
-work
-    editor
-    terminal
-personal
-    shell
+▣ work
+    ▤ editor
+    ▤ terminal
+▣ personal
+    ▤ shell
 ```
 
 Rename entries by editing their names, delete them with `dd`, and move windows
-with linewise cut/paste. **`:w` applies the changes to tmux.**
+with linewise cut/paste. **`:w` previews the actions and asks for confirmation
+before applying the changes to tmux.**
 
 ## Requirements and installation
 
@@ -26,6 +27,7 @@ For a local checkout with lazy.nvim:
 {
   dir = "~/projects/personal/bosana", -- Adjust to your checkout.
   name = "bosana.nvim",
+  main = "bosana",
   lazy = false,
   opts = {},
 }
@@ -40,7 +42,8 @@ when configured. The health check only reads tmux state.
 
 Bosana always runs `tmux` from `PATH`, checking its availability before opening
 and before every tmux command. If `tmux` cannot be found or is not executable,
-it reports an explicit error asking you to install tmux and add it to `PATH`.
+the Lua API and health check report an explicit error asking you to install tmux
+and add it to `PATH`. Interactive commands show a short error-styled message.
 
 Open with `:Bosana`, or map a key:
 
@@ -49,6 +52,10 @@ vim.keymap.set("n", "<leader>bt", "<cmd>Bosana<cr>", { desc = "Edit tmux session
 ```
 
 ## Editing
+
+Session and window icons are inline virtual text: they are not part of the
+editable name, clipboard contents, or tmux commands. Customize them with `icons`
+or set `icons = false` to hide them.
 
 The IDs at the start of each line are concealed text, so they follow linewise
 deletions, pastes, moves, and undo. Internally the example above looks like:
@@ -81,6 +88,15 @@ Use `:wq` to apply and exit, and `:q!` to discard pending edits. Writes finish
 before `:wq` exits. Successful writes re-read tmux and reset undo history, so undo
 cannot restore IDs for entries that no longer exist.
 
+Writes with changes show a synchronous **Yes/No** confirmation listing up to five
+logical actions (renames, moves, deletions, or reorders), plus the number of any
+remaining actions. Press `y` to apply or `n`/Escape to cancel; No is the default.
+Cancellation keeps your edits and prevents `:wq` from exiting. No-op writes do
+not prompt. tmux state is checked both before and after confirmation.
+
+Use `:e!` to discard pending edits and reload current tmux state, just like
+`:BosanaRefresh!`. If reloading fails, the edited buffer is retained.
+
 Window labels are tmux's `window_name`, not pane titles. A manual window rename
 disables tmux's `automatic-rename` for that window, following `rename-window`.
 tmux's stored backslash escapes in session names and in 3.8+ window names are
@@ -90,7 +106,7 @@ Window order is relative: Bosana preserves existing index slots and gaps when
 possible. Membership changes honor each session's `renumber-windows` option.
 An active window remains selected if it survives in its original session.
 
-### First-version boundaries
+### Editing boundaries
 
 - Edit existing entries only; new ID-less rows are rejected.
 - No pane editing, linked/shared windows, or grouped sessions.
@@ -100,7 +116,8 @@ An active window remains selected if it survives in its original session.
   whitespace. Session names cannot contain `.` or `:` because tmux replaces them.
 - Blank lines are ignored. Window rows require exactly four spaces, not tabs.
 
-Invalid edits produce line diagnostics and leave the buffer modified.
+Invalid edits show a short error-styled message and refresh the buffer from tmux,
+discarding the invalid edits. Creating new sessions or windows is not supported.
 
 ## Direct CLI launch and tmux hotkey
 
@@ -156,6 +173,7 @@ nvim -u NONE \
 | `:Bosana --socket-path PATH` | Select a tmux `-S` server |
 | `:BosanaRefresh` | Refresh, refusing to overwrite unsaved edits |
 | `:BosanaRefresh!` | Discard edits and load current tmux state |
+| `:e!` | Discard edits and load current tmux state |
 | `:BosanaClose[!]` | Close; bang discards edits |
 
 Default buffer mappings: `q` closes, `<C-l>` refreshes, and `g?` opens help.
@@ -172,6 +190,8 @@ require("bosana").setup({
   exclude_host_session = false,
   excluded_sessions = {},     -- Native session IDs, e.g. { "$1" }.
   manager = false,
+  icons = { session = "▣", window = "▤" },
+  confirm = true,
   keymaps = {
     ["q"] = "close",
     ["<C-l>"] = "refresh",
@@ -182,6 +202,11 @@ require("bosana").setup({
 
 Set an individual mapping to `false` to remove it, use a function for a custom
 mapping, or set `keymaps = false` to disable all default mappings.
+
+Set `icons = false` to disable icons, or an individual icon to `""` to hide it.
+Icons use the `BosanaSessionIcon` and `BosanaWindowIcon` highlight groups.
+Set `confirm = false` to apply changes without a prompt, including in headless
+automation. Both `require("bosana")` and `require("Bosana")` expose the same API.
 
 ```lua
 local bosana = require("bosana")
@@ -202,9 +227,9 @@ Bosana compares a fresh snapshot with the buffer's baseline before applying
 changes. External renames, moves, deletions, index changes, and server restarts
 require a refresh. Merely selecting a different active window does not.
 
-tmux operations are not transactional. If a command fails after execution starts,
-Bosana retains the edited text and marks the write as blocked to prevent blind
-replay. Inspect the report with:
+Failed writes show a short error-styled message and automatically refresh the
+buffer to reflect actual tmux state. tmux operations are not transactional, so
+some changes may already have been applied. Inspect the detailed report with:
 
 ```vim
 :lua =require('bosana').get_state().last_report
@@ -214,9 +239,12 @@ The report contains completed command argument arrays, the failed command when
 available, and the operation being processed. After a failed transfer, Bosana
 also attempts to remove its temporary destination links when the original source
 still holds the window; these attempts are recorded in `cleanup`. Completed
-transfers and deletions are not rolled back. Preserve any edited rows you need
-(for example by yanking them), then use `:BosanaRefresh!`, inspect the actual
-state, and reapply the remaining edits. A failed write does not exit `:wq`.
+transfers and deletions are not rolled back. Inspect the refreshed state and
+reapply any remaining changes. If tmux cannot be read during recovery, Bosana
+restores its last known snapshot; writes remain blocked if mutations may have
+occurred, until `:BosanaRefresh!` or `:e!` succeeds. Recovery failures are recorded
+in `recovery_error`. Validation details are recorded in `validation`.
+A failed write does not exit `:wq`. Cancelling confirmation keeps your edits.
 
 ## Development
 

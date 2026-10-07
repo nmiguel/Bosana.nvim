@@ -19,6 +19,8 @@ local function child(path, edit, final_command)
     "NONE",
     "--cmd",
     "lua vim.opt.runtimepath:prepend(" .. vim.inspect(root) .. ")",
+    "--cmd",
+    "lua require('bosana').setup({ confirm = false })",
     "-c",
     "runtime plugin/bosana.lua",
     "-c",
@@ -29,6 +31,56 @@ local function child(path, edit, final_command)
   end
   vim.list_extend(argv, { "-c", final_command })
   return vim.system(argv, { text = true }):wait(15000)
+end
+
+local function confirmation_child(path, line, answer)
+  local stderr = {}
+  local channel = vim.fn.jobstart({ "nvim", "--embed", "--headless", "-u", "NONE" }, {
+    rpc = true,
+    on_stderr = function(_, lines)
+      vim.list_extend(stderr, lines)
+    end,
+  })
+  t.ok(channel > 0)
+  local ok, result = xpcall(function()
+    vim.rpcrequest(channel, "nvim_ui_attach", 100, 24, {})
+    vim.rpcrequest(
+      channel,
+      "nvim_exec_lua",
+      [[
+      local root, path, line = ...
+      vim.opt.runtimepath:prepend(root)
+      local bosana = require('bosana')
+      bosana.setup({ confirm = true })
+      local bufnr, err = bosana.open({ socket_path = path })
+      assert(bufnr, err)
+      vim.api.nvim_buf_set_lines(bufnr, 1, 2, false, { line })
+    ]],
+      { vim.fn.getcwd(), path, line }
+    )
+    vim.rpcnotify(
+      channel,
+      "nvim_exec_lua",
+      [[
+      local answer = ...
+      vim.api.nvim_feedkeys(answer, 'nt', false)
+      if answer == 'y' then
+        vim.cmd('wq')
+      else
+        local ok, err = pcall(vim.cmd, 'wq')
+        assert(not ok and tostring(err):find('Write cancelled'))
+        assert(vim.bo.modified)
+        assert(not require('bosana').get_state().blocked)
+        vim.cmd('qa!')
+      end
+    ]],
+      { answer }
+    )
+    return vim.fn.jobwait({ channel }, 15000)[1]
+  end, debug.traceback)
+  vim.fn.jobstop(channel)
+  t.ok(ok, result)
+  return { code = result, stderr = table.concat(stderr, "\n") }
 end
 
 t.test("real snapshots retain names, indices, and server identity", function()
@@ -85,10 +137,46 @@ t.test("real example 4: duplicate IDs cannot mutate tmux", function()
   local success, err = bosana.save()
   t.eq(success, nil)
   t.contains(err, "Duplicate ID")
-  t.ok(vim.bo[bufnr].modified)
+  t.eq(vim.bo[bufnr].modified, false)
   t.ok(vim.bo[bufnr].modifiable)
-  t.ok(#vim.diagnostic.get(bufnr, { namespace = buffer.namespace }) > 0)
+  t.eq(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), buffer.lines(baseline))
+  t.eq(vim.diagnostic.get(bufnr, { namespace = buffer.namespace }), {})
+  t.contains(bosana.get_state().last_report.validation[1].message, "Duplicate ID")
   t.ok(model.same(t.ok(client:snapshot()), baseline))
+end)
+
+t.test("creating an entry shows a short styled error and restores a usable buffer", function()
+  local client, baseline, path = t.fixture({ { "a" } })
+  local bufnr = open(path)
+  local lines = buffer.lines(baseline)
+  lines[#lines + 1] = "new session"
+  vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
+  local original_echo, messages = vim.api.nvim_echo, {}
+  vim.api.nvim_echo = function(chunks, history, opts)
+    messages[#messages + 1] = { chunks = chunks, history = history, opts = opts }
+  end
+  local ok, err = pcall(vim.cmd, "write")
+  vim.api.nvim_echo = original_echo
+  t.ok(ok, err)
+  t.eq(messages, {
+    {
+      chunks = { { "Bosana: Could not save changes.", "ErrorMsg" } },
+      history = true,
+      opts = { err = true },
+    },
+  })
+  t.eq(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), buffer.lines(baseline))
+  t.eq(vim.bo[bufnr].modified, false)
+  t.ok(vim.bo[bufnr].modifiable)
+  t.eq(bosana.get_state().blocked, false)
+  t.ok(model.same(t.ok(client:snapshot()), baseline))
+  vim.cmd("normal! u")
+  t.eq(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), buffer.lines(baseline))
+  vim.api.nvim_buf_set_lines(bufnr, 1, 2, false, {
+    t.window_line(baseline.sessions[1].windows[1], "retry"),
+  })
+  t.ok(bosana.save())
+  t.eq(t.ok(client:snapshot()).sessions[1].windows[1].name, "retry")
 end)
 
 t.test("real example 5: delete an individual window", function()
@@ -355,7 +443,7 @@ t.test("host exclusion outside tmux returns a useful error", function()
   t.contains(err, "inside a tmux pane")
 end)
 
-t.test("partial failure preserves edits, reports completed commands, and blocks replay", function()
+t.test("partial failure refreshes actual state and permits a safe retry", function()
   local client, baseline = t.fixture({ { "a" } })
   local original_run, count = client.run, 0
   client.run = function(self, args)
@@ -367,32 +455,97 @@ t.test("partial failure preserves edits, reports completed commands, and blocks 
     end
     return original_run(self, args)
   end
-  local bufnr = buffer.create(client, baseline, { keymaps = false }, "failure-test")
+  local bufnr =
+    buffer.create(client, baseline, { keymaps = false, confirm = false }, "failure-test")
   local lines = buffer.lines(baseline)
   lines[1] = t.session_line(baseline.sessions[1], "renamed")
   vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
   local success, err = bosana.save()
   t.eq(success, nil)
   t.contains(err, "injected failure")
-  t.eq(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), lines)
-  t.ok(vim.bo[bufnr].modified)
+  local actual = t.ok(client:snapshot())
+  t.eq(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), buffer.lines(actual))
+  t.ok(model.same(bosana.get_state().baseline, actual))
+  t.eq(vim.bo[bufnr].modified, false)
   t.ok(vim.bo[bufnr].modifiable)
   local state = bosana.get_state()
-  t.eq(state.blocked, true)
+  t.eq(state.blocked, false)
   t.eq(#state.last_report.completed, 1)
   t.eq(state.last_report.failed[1], "rename-session")
+  t.ok(bosana.save())
+  t.eq(count, 2)
+end)
+
+t.test("partial failure with unavailable recovery blocks replay until refresh", function()
+  local client, baseline, path = t.fixture({ { "a" } })
+  local bufnr = open(path)
+  local state = buffer.get(bufnr)
+  local original_run, original_snapshot = state.client.run, state.client.snapshot
+  local count, failed = 0, false
+  state.client.run = function(self, args)
+    if args[1] == "rename-session" then
+      count = count + 1
+      if count == 2 then
+        failed = true
+        return nil, "injected mutation failure"
+      end
+    end
+    return original_run(self, args)
+  end
+  state.client.snapshot = function(self, excluded)
+    if failed then
+      return nil, "injected recovery failure"
+    end
+    return original_snapshot(self, excluded)
+  end
+  vim.api.nvim_buf_set_lines(bufnr, 0, 1, false, {
+    t.session_line(baseline.sessions[1], "renamed"),
+  })
+  local success, err = bosana.save()
+  t.eq(success, nil)
+  t.contains(err, "injected mutation failure")
+  t.eq(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), buffer.lines(baseline))
+  t.eq(vim.bo[bufnr].modified, false)
+  t.ok(vim.bo[bufnr].modifiable)
+  t.eq(bosana.get_state().blocked, true)
+  t.contains(bosana.get_state().last_report.recovery_error, "injected recovery failure")
   success, err = bosana.save()
   t.eq(success, nil)
   t.contains(err, "Previous write partly failed")
   t.eq(count, 2)
+  failed = false
   t.ok(bosana.refresh({ force = true }))
   t.eq(bosana.get_state().blocked, false)
+  t.eq(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), buffer.lines(t.ok(client:snapshot())))
+  t.ok(bosana.save())
+end)
+
+t.test("unexpected save exceptions refresh state and release the write lock", function()
+  local client, baseline, path = t.fixture({ { "a" } })
+  local bufnr = open(path)
+  vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, { "invalid edit" })
+  local parser = require("bosana.parser")
+  local original_parse = parser.parse
+  parser.parse = function()
+    error("injected unexpected exception")
+  end
+  local success, err = bosana.save()
+  parser.parse = original_parse
+  t.eq(success, nil)
+  t.contains(err, "injected unexpected exception")
+  t.eq(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), buffer.lines(t.ok(client:snapshot())))
+  t.eq(vim.bo[bufnr].modified, false)
+  t.ok(vim.bo[bufnr].modifiable)
+  t.eq(bosana.get_state().blocked, false)
+  t.contains(bosana.get_state().last_report.message, "injected unexpected exception")
+  t.ok(bosana.save())
 end)
 
 t.test("concealed IDs survive linewise cut/paste and undo", function()
   local _, baseline, path = t.fixture()
   local bufnr = open(path)
   t.eq(vim.bo[bufnr].buftype, "acwrite")
+  t.eq(vim.bo[bufnr].buflisted, false)
   t.eq(vim.wo.conceallevel, 3)
   t.eq(vim.wo.concealcursor, "nvic")
   local original = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
@@ -424,7 +577,7 @@ t.test("concealed IDs survive linewise cut/paste and undo", function()
   assert_concealed(original)
 end)
 
-t.test("rendered rows hide IDs in normal and insert modes with syntax disabled globally", function()
+t.test("icons and IDs render correctly without globally enabled syntax", function()
   local channel = vim.fn.jobstart({ "nvim", "--embed", "--headless", "-u", "NONE" }, { rpc = true })
   t.ok(channel > 0, "Could not start the Neovim UI test")
   local ok, err = xpcall(function()
@@ -443,7 +596,7 @@ t.test("rendered rows hide IDs in normal and insert modes with syntax disabled g
           } },
         },
       })
-      require('bosana.buffer').create({}, snapshot, { keymaps = false }, 'screen-test')
+      require('bosana.buffer').create({}, snapshot, require('bosana.config').get({ keymaps = false }), 'screen-test')
     ]],
       { vim.fn.getcwd() }
     )
@@ -463,8 +616,8 @@ t.test("rendered rows hide IDs in normal and insert modes with syntax disabled g
         { row }
       )
     end
-    t.eq(screen_row(1), "work")
-    t.eq(screen_row(2), "    editor /@89")
+    t.eq(screen_row(1), "▣ work")
+    t.eq(screen_row(2), "    ▤ editor /@89")
     vim.rpcrequest(channel, "nvim_win_set_cursor", 0, { 2, 11 })
     vim.rpcrequest(channel, "nvim_input", "i")
     t.ok(
@@ -473,8 +626,8 @@ t.test("rendered rows hide IDs in normal and insert modes with syntax disabled g
       end, 10),
       "UI test did not enter insert mode"
     )
-    t.eq(screen_row(1), "work")
-    t.eq(screen_row(2), "    editor /@89")
+    t.eq(screen_row(1), "▣ work")
+    t.eq(screen_row(2), "    ▤ editor /@89")
     t.eq(vim.rpcrequest(channel, "nvim_buf_get_lines", 0, 0, -1, false), {
       "/$123 work",
       "/@4567     editor /@89",
@@ -482,6 +635,22 @@ t.test("rendered rows hide IDs in normal and insert modes with syntax disabled g
   end, debug.traceback)
   vim.fn.jobstop(channel)
   t.ok(ok, err)
+end)
+
+t.test(":wq waits for affirmative confirmation before applying and exiting", function()
+  local client, baseline, path = t.fixture({ { "a" } })
+  local line = t.window_line(baseline.sessions[1].windows[1], "confirmed-before-exit")
+  local result = confirmation_child(path, line, "y")
+  t.eq(result.code, 0, result.stderr)
+  t.eq(t.ok(client:snapshot()).sessions[1].windows[1].name, "confirmed-before-exit")
+end)
+
+t.test("declining confirmation keeps :wq in the modified editor", function()
+  local client, baseline, path = t.fixture({ { "a" } })
+  local line = t.window_line(baseline.sessions[1].windows[1], "declined")
+  local result = confirmation_child(path, line, "n")
+  t.eq(result.code, 0, result.stderr)
+  t.ok(model.same(t.ok(client:snapshot()), baseline))
 end)
 
 t.test(":w applies edits, refreshes the baseline, and resets undo", function()
@@ -543,13 +712,13 @@ t.test("direct startup and :wq complete mutations before exiting", function()
   t.eq(t.ok(client:snapshot()).sessions[1].windows[1].name, "saved-before-exit")
 end)
 
-t.test("failed :wq stays in the modified editor", function()
+t.test("failed :wq stays in the refreshed editor", function()
   local client, baseline, path = t.fixture({ { "a" } })
   local line = t.window_line(baseline.sessions[1].windows[1])
   local result = child(
     path,
     "vim.api.nvim_buf_set_lines(0, 2, 2, false, { " .. vim.inspect(line) .. " })",
-    [[lua local ok = pcall(vim.cmd, 'wq'); assert(not ok); assert(vim.bo.modified); print('WRITE_BLOCKED'); vim.cmd('qa!')]]
+    [[lua local ok,err = pcall(vim.cmd, 'wq'); assert(not ok); assert(tostring(err):find('Bosana: Could not save changes.',1,true)); assert(not tostring(err):find('Lua callback',1,true)); assert(not vim.bo.modified); assert(not require('bosana').get_state().blocked); print('WRITE_BLOCKED'); vim.cmd('qa!')]]
   )
   t.eq(result.code, 0, result.stderr)
   t.contains(result.stderr, "WRITE_BLOCKED")

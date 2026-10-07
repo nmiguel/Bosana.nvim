@@ -3,14 +3,14 @@ if vim.g.loaded_bosana then
 end
 vim.g.loaded_bosana = true
 
-local function checked(value, err)
+local function checked(message, value)
   if not value then
-    error("Bosana: " .. err, 0)
+    require("bosana.message").error(message)
   end
 end
 
 vim.api.nvim_create_user_command("Bosana", function(args)
-  checked(require("bosana").command(args.fargs))
+  checked("Could not open tmux sessions.", require("bosana").command(args.fargs))
 end, {
   nargs = "*",
   desc = "Edit tmux sessions and windows",
@@ -22,9 +22,9 @@ end, {
 })
 
 vim.api.nvim_create_user_command("BosanaRefresh", function(args)
-  checked(require("bosana").refresh({ force = args.bang }))
+  checked("Could not refresh tmux sessions.", require("bosana").refresh({ force = args.bang }))
 end, { bang = true, desc = "Refresh tmux state (bang discards edits)" })
 
 vim.api.nvim_create_user_command("BosanaClose", function(args)
-  checked(require("bosana").close({ force = args.bang }))
+  checked("Could not close the buffer.", require("bosana").close({ force = args.bang }))
 end, { bang = true, desc = "Close Bosana (bang discards edits)" })

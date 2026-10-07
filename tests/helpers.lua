@@ -55,7 +55,7 @@ function M.cleanup()
       vim.api.nvim_buf_delete(bufnr, { force = true })
     end
   end
-  require("bosana").setup({})
+  require("bosana").setup({ confirm = false })
 end
 
 function M.baseline()

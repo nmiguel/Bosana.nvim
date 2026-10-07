@@ -5,6 +5,7 @@ CONTENTS                                                    *bosana*
 
     Usage                  |bosana-usage|
     Editing                |bosana-editing|
+    Save confirmation      |bosana-confirmation|
     Commands               |bosana-commands|
     Configuration          |bosana-configuration|
     Lua API                |bosana-api|
@@ -20,9 +21,11 @@ USAGE                                                       *bosana-usage*
 Open the editor with :Bosana or: >lua
     require("bosana").open()
 <
-The buffer shows sessions with their windows indented by four spaces. IDs are
-concealed text at the start of each row. Use normal linewise edits, then :w to
-apply them. :wq applies successfully before exiting; :q! discards pending edits.
+The buffer shows sessions with their windows indented by four spaces. Each row
+has an icon; IDs are concealed text at the start of each row. Use normal linewise
+edits, then :w to confirm and apply them. :wq waits for confirmation and applies
+successfully before exiting; :q! discards pending edits. :e! discards edits and
+loads fresh tmux state.
 
 Default buffer mappings:
     q       Close (refuses unsaved edits).
@@ -34,6 +37,8 @@ EDITING                                                     *bosana-editing*
 
 An internal row is "/$1 session" or "/@2     window". The ID and following
 separator are concealed. Window indentation is four additional spaces.
+Icons are inline virtual text, not editable name characters. They follow edits
+and undo without entering clipboard contents or tmux names.
 
 Rename by editing the name with cw, C, A, or a substitution. Keep the hidden
 prefix intact; cc removes it. IDs travel with linewise cut/paste and undo.
@@ -50,13 +55,26 @@ they survive in their original sessions. Window labels use window_name, not
 pane_title; rename-window disables automatic-rename as it normally does.
 
 Successful writes refresh state and clear undo history. Undo cannot restore
-obsolete IDs after a save. Invalid writes show diagnostics and remain modified.
+obsolete IDs after a save. Invalid writes show a short error-styled message and
+refresh the buffer from tmux, discarding the invalid edits.
 
 Unsupported in this version: creation, pane editing, linked/shared windows,
 grouped sessions, duplicate IDs, control characters in names, empty names,
 surrounding whitespace in names, and session names containing '.' or ':'.
 Window names may repeat; retained session names must be unique. Blank rows are
 ignored. Window indentation must be exactly four spaces, not tabs.
+
+=============================================================================
+SAVE CONFIRMATION                                           *bosana-confirmation*
+
+Writes with changes show a synchronous Yes/No prompt listing up to five logical
+actions, plus the count of any remaining actions. Temporary renames and links
+are represented by their user-visible rename or move. No-op writes do not prompt.
+
+Press y to apply; n or Escape cancels. No is the default. Cancellation leaves the
+buffer modified and prevents :wq from exiting. tmux state is checked before and
+after confirmation, so changes made while the prompt is open require a refresh.
+Set confirm=false to skip confirmation, including in headless automation.
 
 =============================================================================
 COMMANDS                                                    *bosana-commands*
@@ -69,6 +87,7 @@ COMMANDS                                                    *bosana-commands*
     --socket-path PATH   Use tmux -S PATH.
 
 :BosanaRefresh[!]         Refresh; bang discards unsaved edits.
+:e[!]                    Reload tmux state; bang discards unsaved edits.
 :BosanaClose[!]           Close; bang discards unsaved edits.
 
 =============================================================================
@@ -81,6 +100,8 @@ CONFIGURATION                                               *bosana-configuratio
       exclude_host_session = false,
       excluded_sessions = {}, -- Native session IDs, e.g. { "$1" }.
       manager = false,
+      icons = { session = "▣", window = "▤" },
+      confirm = true,
       keymaps = {
         ["q"] = "close",
         ["<C-l>"] = "refresh",
@@ -91,6 +112,10 @@ CONFIGURATION                                               *bosana-configuratio
 Setup is optional. Socket name/path are mutually exclusive. Without either,
 tmux inherits $TMUX or uses the default server. Mapping values are action names,
 functions, or false; keymaps=false disables all default mappings.
+icons=false disables icons; an empty string hides an individual icon. Icon
+highlight groups are BosanaSessionIcon (Title) and BosanaWindowIcon (Special).
+confirm=false skips the save prompt. Both require("bosana") and require("Bosana")
+return the same public API; lazy.nvim specs can set main="bosana" explicitly.
 
 =============================================================================
 LUA API                                                     *bosana-api*
@@ -106,6 +131,7 @@ open() accepts per-view configuration overrides. Operations return a result or
 nil,error; setup() raises invalid configuration errors. Buffer arguments default
 to the current buffer. get_state() returns a copy of the baseline, blocked flag,
 buffer number, and last execution report, or nil outside a Bosana buffer.
+save() uses the same confirmation as :w unless confirm=false is configured.
 
 =============================================================================
 DEDICATED TMUX SESSION                                      *bosana-manager*
@@ -135,17 +161,22 @@ changes, renames, indices, and server restarts require refresh; active-window
 selection does not. tmux commands are executed as argument arrays, with names
 escaped for tmux format expansion, rather than as shell command strings.
 
-Execution is not transactional. After a failed mutation, edited text is retained
-and writes are blocked until an explicit refresh. Inspect completed commands,
-the failed command, and the current operation using: >
+Failed writes show a short error-styled message and automatically refresh the
+buffer from tmux. Execution is not transactional; some changes may already have
+been applied. Inspect completed commands, the failed command, and the current
+operation using: >
     :lua =require('bosana').get_state().last_report
 <
 After a failed transfer, temporary destination links are removed when the source
 still owns the window; cleanup attempts are recorded in the report. Completed
 transfers and deletions are not rolled back.
 
-Preserve needed edits (e.g. yank rows), then :BosanaRefresh!, inspect actual tmux
-state, and reapply remaining edits. A failed :wq stays in the modified editor.
+Inspect the refreshed state and reapply remaining changes. If recovery cannot
+read tmux, the last known snapshot is restored; writes stay blocked if mutations
+may have occurred, until :BosanaRefresh! or :e! succeeds. Recovery failures are
+recorded in recovery_error; validation details are recorded in validation.
+A failed :wq stays in the editor. Cancelling confirmation retains pending edits.
+If an explicit reload fails, pending edits are retained.
 
 =============================================================================
 HEALTH CHECKS                                               *bosana-health*
@@ -158,7 +189,8 @@ exclusion when configured. This only reads tmux state; it does not change any
 sessions, windows, or options. No running sessions is an informational result.
 
 Bosana always runs tmux from PATH. Before opening and before each tmux command,
-it checks that tmux is available and executable. If not, an explicit error asks
-you to install tmux and add it to PATH.
+it checks that tmux is available and executable. If not, the Lua API and health
+check explicitly ask you to install tmux and add it to PATH. Interactive commands
+show a short error-styled message.
 
 vim:tw=78:ts=8:ft=help:norl:
