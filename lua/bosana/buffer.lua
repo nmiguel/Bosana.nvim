@@ -3,6 +3,7 @@ local planner = require("bosana.planner")
 local executor = require("bosana.executor")
 local confirmation = require("bosana.confirmation")
 local message = require("bosana.message")
+local preview = require("bosana.preview")
 local M = {}
 local states = {}
 local namespace = vim.api.nvim_create_namespace("bosana")
@@ -86,6 +87,7 @@ local function attach_icons(state)
           state.icons_pending = false
           if states[state.bufnr] == state and vim.api.nvim_buf_is_loaded(state.bufnr) then
             render_icons(state)
+            preview.update(state, true)
           end
         end)
       end
@@ -180,6 +182,7 @@ local function render(state, snapshot)
     end
     vim.api.nvim_win_set_cursor(win, { row, name_column(lines[row] or "") })
   end
+  preview.update(state, true)
 end
 
 local function recover(state)
@@ -349,6 +352,7 @@ function M.create(client, snapshot, options, key)
   attach_icons(state)
 
   local group = vim.api.nvim_create_augroup("BosanaBuffer" .. bufnr, { clear = true })
+  preview.attach(state, group)
   vim.api.nvim_create_autocmd("BufWriteCmd", {
     group = group,
     buffer = bufnr,
@@ -434,6 +438,7 @@ function M.create(client, snapshot, options, key)
     group = group,
     buffer = bufnr,
     callback = function()
+      preview.destroy(state)
       states[bufnr] = nil
       vim.schedule(function()
         pcall(vim.api.nvim_del_augroup_by_id, group)

@@ -596,7 +596,7 @@ t.test("icons and IDs render correctly without globally enabled syntax", functio
           } },
         },
       })
-      require('bosana.buffer').create({}, snapshot, require('bosana.config').get({ keymaps = false }), 'screen-test')
+      require('bosana.buffer').create({}, snapshot, require('bosana.config').get({ keymaps = false, preview = false }), 'screen-test')
     ]],
       { vim.fn.getcwd() }
     )

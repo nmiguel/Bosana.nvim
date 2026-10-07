@@ -9,6 +9,7 @@ M.defaults = {
   manager = false,
   icons = { session = "▣", window = "▤" },
   confirm = true,
+  preview = true,
   keymaps = {
     ["q"] = "close",
     ["<C-l>"] = "refresh",
@@ -35,7 +36,7 @@ function M.validate(opts)
   if type(opts.timeout_ms) ~= "number" or opts.timeout_ms <= 0 then
     error("timeout_ms must be positive", 0)
   end
-  for _, key in ipairs({ "exclude_host_session", "manager", "confirm" }) do
+  for _, key in ipairs({ "exclude_host_session", "manager", "confirm", "preview" }) do
     if type(opts[key]) ~= "boolean" then
       error(key .. " must be a boolean", 0)
     end

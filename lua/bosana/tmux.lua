@@ -40,6 +40,18 @@ function M.check_executable()
   return path ~= "" and path or "tmux"
 end
 
+local function command_result(result)
+  if result.code ~= 0 then
+    local message = vim.trim(result.stderr or "")
+    if message == "" then
+      message = result.code == 124 and "tmux command timed out"
+        or ("tmux exited with code " .. result.code)
+    end
+    return nil, message
+  end
+  return result.stdout or ""
+end
+
 function Client:run(args)
   local executable, executable_err = M.check_executable()
   if not executable then
@@ -52,15 +64,43 @@ function Client:run(args)
   if not ok then
     return nil, tostring(result)
   end
-  if result.code ~= 0 then
-    local message = vim.trim(result.stderr or "")
-    if message == "" then
-      message = result.code == 124 and "tmux command timed out"
-        or ("tmux exited with code " .. result.code)
-    end
-    return nil, message
+  return command_result(result)
+end
+
+-- Capture the visible screen with ANSI colors/styles for the preview terminal.
+-- Native window IDs still resolve while rows have unsaved moves/names.
+function Client:capture(window_id, callback)
+  local executable, err = M.check_executable()
+  if not executable then
+    vim.schedule(function()
+      callback(nil, err)
+    end)
+    return
   end
-  return result.stdout or ""
+  local argv = vim.list_extend(vim.deepcopy(self.prefix), {
+    "capture-pane",
+    "-p",
+    "-e",
+    "-t",
+    window_id,
+  })
+  local ok, process = pcall(
+    vim.system,
+    argv,
+    { text = true, timeout = self.timeout_ms },
+    function(result)
+      vim.schedule(function()
+        callback(command_result(result))
+      end)
+    end
+  )
+  if not ok then
+    vim.schedule(function()
+      callback(nil, tostring(process))
+    end)
+    return
+  end
+  return process
 end
 
 function Client:display(target, format)
