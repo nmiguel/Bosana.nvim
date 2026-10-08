@@ -6,6 +6,7 @@ CONTENTS                                                    *bosana*
     Usage                  |bosana-usage|
     Editing                |bosana-editing|
     Save confirmation      |bosana-confirmation|
+    Window preview         |bosana-preview|
     Commands               |bosana-commands|
     Configuration          |bosana-configuration|
     Lua API                |bosana-api|
@@ -77,6 +78,25 @@ after confirmation, so changes made while the prompt is open require a refresh.
 Set confirm=false to skip confirmation, including in headless automation.
 
 =============================================================================
+WINDOW PREVIEW                                              *bosana-preview*
+
+Moving onto a window row shows a read-only, non-focusable floating panel on the
+right side of the Bosana view. It captures the visible screen of the window's
+active pane with terminal colors and text styles, without scrollback. Output is
+clipped to the panel size. Moving between windows updates it; CursorHold and
+CursorHoldI refresh output when the cursor pauses, using Neovim's 'updatetime'.
+
+Captures are asynchronous and use the same tmux server and command timeout as
+the editor. They do not select windows or panes. Native window IDs keep previews
+correct through unsaved renames and moves. Late results from previous rows are
+ignored. Capture errors appear inside the panel without changing pending edits.
+
+The panel hides on session headers, blank/unknown rows, when leaving Bosana, or
+when the editor is too small. Closing Bosana removes the preview buffer/window;
+the floating panel does not prevent :wq or manager-mode exit.
+Set preview=false in setup() or open() to disable previews.
+
+=============================================================================
 COMMANDS                                                    *bosana-commands*
 
 :Bosana [options]         Open/reuse a view, preserving pending edits.
@@ -102,6 +122,7 @@ CONFIGURATION                                               *bosana-configuratio
       manager = false,
       icons = { session = "▣", window = "▤" },
       confirm = true,
+      preview = true,
       keymaps = {
         ["q"] = "close",
         ["<C-l>"] = "refresh",
@@ -139,6 +160,14 @@ DEDICATED TMUX SESSION                                      *bosana-manager*
 Direct interactive startup: >sh
     nvim -c 'Bosana'
 <
+To open a new window after Neovim startup, use an explicit window name: >
+    bind b new-window -n bosana \
+        'nvim -c "autocmd VimEnter * ++once lua vim.schedule(function() vim.cmd([[Bosana]]) end)"'
+<
+-n bosana disables automatic window naming for this window. Otherwise tmux can
+rename it after the opening snapshot, making the first save fail with "tmux state
+changed since opening the buffer".
+
 Suggested tmux.conf hotkey: >
     bind-key B new-session -A -s bosana -n manager \
         'exec nvim -c "Bosana --manager"'

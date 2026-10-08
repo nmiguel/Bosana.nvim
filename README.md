@@ -19,17 +19,22 @@ before applying the changes to tmux.**
 
 - Neovim 0.10+.
 - tmux on `PATH` (developed and tested with tmux 3.8-rc3).
-- No Lua dependencies; Oil does not need to be installed.
 
 For a local checkout with lazy.nvim:
 
 ```lua
 {
-  dir = "~/projects/personal/bosana", -- Adjust to your checkout.
-  name = "bosana.nvim",
-  main = "bosana",
-  lazy = false,
+  "nmiguel/Bosana.nvim",
   opts = {},
+  commands = {
+    {
+      "Bosana",
+      function()
+        require("bosana").open()
+      end,
+      desc = "Open Bosana",
+    },
+  },
 }
 ```
 
@@ -73,18 +78,18 @@ additional spaces of indentation. Keep each entry's hidden prefix intact when
 renaming: use `cw`, `C`, `A`, or a substitution on the name instead of replacing
 the entire line with `cc`.
 
-| Edit | Result on write |
-| --- | --- |
-| Change a session/window name | Rename that existing entry |
-| Remove a window row | Delete that window |
-| Move a window beneath another session | Transfer the window to that session |
-| Reorder window rows within a session | Reorder the windows |
-| Remove a session and its window rows | Delete the session |
-| Leave an empty session header | Delete the session |
-| Move windows out of a deleted session | Preserve those windows in their destinations |
-| Reorder session blocks | No change; tmux has no corresponding session order |
+| Edit                                  | Result on write                                    |
+| ------------------------------------- | -------------------------------------------------- |
+| Change a session/window name          | Rename that existing entry                         |
+| Remove a window row                   | Delete that window                                 |
+| Move a window beneath another session | Transfer the window to that session                |
+| Reorder window rows within a session  | Reorder the windows                                |
+| Remove a session and its window rows  | Delete the session                                 |
+| Leave an empty session header         | Delete the session                                 |
+| Move windows out of a deleted session | Preserve those windows in their destinations       |
+| Reorder session blocks                | No change; tmux has no corresponding session order |
 
-Use `:wq` to apply and exit, and `:q!` to discard pending edits. Writes finish
+Use `:w` or `:wq` to apply and exit, and `:q!` to discard pending edits. Writes finish
 before `:wq` exits. Successful writes re-read tmux and reset undo history, so undo
 cannot restore IDs for entries that no longer exist.
 
@@ -106,6 +111,21 @@ Window order is relative: Bosana preserves existing index slots and gaps when
 possible. Membership changes honor each session's `renumber-windows` option.
 An active window remains selected if it survives in its original session.
 
+### Window preview
+
+Move the cursor onto a window row to show a read-only preview panel on the right
+side of the Bosana view. It displays the visible screen of that window's **active
+pane**, preserving terminal colors and text styles, clipped to the panel's size.
+Moving between windows updates the preview; pausing on a row refreshes its output.
+
+Captures run asynchronously on the selected tmux server, without switching its
+active window or taking focus from the editor. Native IDs keep previews attached
+to the correct window during unsaved renames and moves. Session headers, blank
+or unknown rows, and leaving Bosana hide the panel. It also hides when the editor
+is too small. Capture failures appear inside the panel and leave edits intact.
+
+Set `preview = false` in `setup()` or `open()` to disable it.
+
 ### Editing boundaries
 
 - Edit existing entries only; new ID-less rows are rejected.
@@ -126,6 +146,17 @@ After installing the plugin, launch an interactive editor directly:
 ```sh
 nvim -c 'Bosana'
 ```
+
+To open Bosana in a new tmux window after Neovim startup:
+
+```tmux
+bind b new-window -n bosana \
+    'nvim -c "autocmd VimEnter * ++once lua vim.schedule(function() vim.cmd([[Bosana]]) end)"'
+```
+
+The explicit `-n bosana` disables tmux's automatic window naming for this window.
+Without it, tmux can rename the window after Bosana takes its opening snapshot,
+causing the first save to fail with “tmux state changed since opening the buffer.”
 
 For a dedicated manager session, add this to `tmux.conf`:
 
@@ -164,17 +195,17 @@ nvim -u NONE \
 
 ## Commands and default mappings
 
-| Command | Behavior |
-| --- | --- |
-| `:Bosana` | Open the editor, reusing an existing view without discarding edits |
-| `:Bosana --manager` | Open in a dedicated hosting session |
-| `:Bosana --exclude-host-session` | Exclude the hosting session |
-| `:Bosana --socket-name NAME` | Select a tmux `-L` server |
-| `:Bosana --socket-path PATH` | Select a tmux `-S` server |
-| `:BosanaRefresh` | Refresh, refusing to overwrite unsaved edits |
-| `:BosanaRefresh!` | Discard edits and load current tmux state |
-| `:e!` | Discard edits and load current tmux state |
-| `:BosanaClose[!]` | Close; bang discards edits |
+| Command                          | Behavior                                                           |
+| -------------------------------- | ------------------------------------------------------------------ |
+| `:Bosana`                        | Open the editor, reusing an existing view without discarding edits |
+| `:Bosana --manager`              | Open in a dedicated hosting session                                |
+| `:Bosana --exclude-host-session` | Exclude the hosting session                                        |
+| `:Bosana --socket-name NAME`     | Select a tmux `-L` server                                          |
+| `:Bosana --socket-path PATH`     | Select a tmux `-S` server                                          |
+| `:BosanaRefresh`                 | Refresh, refusing to overwrite unsaved edits                       |
+| `:BosanaRefresh!`                | Discard edits and load current tmux state                          |
+| `:e!`                            | Discard edits and load current tmux state                          |
+| `:BosanaClose[!]`                | Close; bang discards edits                                         |
 
 Default buffer mappings: `q` closes, `<C-l>` refreshes, and `g?` opens help.
 Plugin managers usually generate help tags automatically. For a manually loaded
@@ -192,6 +223,7 @@ require("bosana").setup({
   manager = false,
   icons = { session = "▣", window = "▤" },
   confirm = true,
+  preview = true,
   keymaps = {
     ["q"] = "close",
     ["<C-l>"] = "refresh",
@@ -256,4 +288,7 @@ stylua --check lua plugin tests
 Tests use isolated tmux sockets under `/tmp/opencode` and kill only those test
 servers. That directory must exist. They exercise the parser/planner, real tmux
 mutations, exclusions, failures, concealment, undo, and child Neovim exit behavior.
+Preview tests cover active-pane captures, cursor changes, unsaved moves, reloads,
+asynchronous cancellation, failures, cleanup, Unicode clipping, and attached-UI
+colors/styles, resizing, and exit.
 See [the complete test outline](tests/README.md) for every test and its purpose.
