@@ -10,7 +10,8 @@ local function open(path, opts)
   return t.ok(bufnr, err)
 end
 
-local function child(path, edit, final_command)
+local function child(path, edit, final_command, opts)
+  opts = opts or {}
   local root = vim.fn.getcwd()
   local argv = {
     "nvim",
@@ -24,13 +25,34 @@ local function child(path, edit, final_command)
     "-c",
     "runtime plugin/bosana.lua",
     "-c",
-    "Bosana --socket-path " .. path,
+    "Bosana --socket-path " .. path .. (opts.manager and " --manager" or ""),
   }
+  if opts.startup then
+    -- Register restoration before the CLI launch, as user configuration does.
+    table.insert(argv, 2, "--cmd")
+    table.insert(argv, 3, "lua " .. opts.startup)
+  end
   if edit then
     vim.list_extend(argv, { "-c", "lua " .. edit })
   end
   vim.list_extend(argv, { "-c", final_command })
-  return vim.system(argv, { text = true }):wait(15000)
+  return vim.system(argv, { text = true, env = opts.env }):wait(15000)
+end
+
+local function manager_child(edit, final_command, startup)
+  local client, baseline, path = t.fixture({ { "work" }, { "manager" } })
+  local host = baseline.sessions[2]
+  local pane = t.ok(client:display(host.id .. ":" .. host.windows[1].id, "#{pane_id}"))
+  local result = child(path, edit, final_command, {
+    manager = true,
+    startup = startup,
+    env = {
+      TMUX = path .. "," .. baseline.server_id:match("^(%d+)") .. ",0",
+      TMUX_PANE = pane,
+    },
+  })
+  t.eq(result.code, 0, result.stderr)
+  t.ok(model.same(t.ok(client:snapshot()), baseline))
 end
 
 local function confirmation_child(path, line, answer)
@@ -441,6 +463,92 @@ t.test("host exclusion outside tmux returns a useful error", function()
   vim.env.TMUX_PANE = original
   t.eq(bufnr, nil)
   t.contains(err, "inside a tmux pane")
+end)
+
+t.test("manager q exits the whole editor with another window and an active preview", function()
+  manager_child(
+    [[
+      local bufnr = vim.api.nvim_get_current_buf()
+      vim.cmd('new')
+      vim.cmd('wincmd p')
+      assert(vim.api.nvim_get_current_buf() == bufnr)
+      vim.api.nvim_win_set_cursor(0, { 2, 11 })
+      vim.api.nvim_exec_autocmds('CursorMoved', { buffer = bufnr })
+      assert(vim.wait(1000, function()
+        local preview = require('bosana.buffer').get(bufnr).preview
+        return preview.win and vim.api.nvim_win_is_valid(preview.win)
+      end, 10))
+      vim.g.manager_ready = true
+    ]],
+    "lua if vim.g.manager_ready then vim.cmd('normal q') end; vim.cmd('cquit 1')"
+  )
+end)
+
+t.test("manager CLI startup restores its mode after scheduled session restoration", function()
+  manager_child(
+    nil,
+    [[lua vim.api.nvim_create_autocmd('VimEnter', {
+      once = true,
+      callback = function()
+        vim.schedule(function()
+          local ok, err = xpcall(function()
+            local buffer = require('bosana.buffer')
+            assert(vim.g.session_restored, 'Session restoration did not run')
+            assert(buffer.get().options.manager, 'Session restoration lost manager mode')
+            assert(#vim.api.nvim_buf_get_lines(0, 0, -1, false) == 2)
+            vim.cmd('normal q')
+            error('Manager q did not exit')
+          end, debug.traceback)
+          if not ok then print(err) end
+          vim.cmd('cquit 1')
+        end)
+      end,
+    })]],
+    [[
+      vim.api.nvim_create_autocmd('VimEnter', {
+        once = true,
+        callback = function()
+          vim.schedule(function()
+            local buffer = require('bosana.buffer')
+            local bufnr = vim.api.nvim_get_current_buf()
+            local state = buffer.get(bufnr)
+            assert(state.options.manager)
+            local path = state.client.prefix[3]
+            vim.api.nvim_buf_delete(bufnr, { force = true })
+            vim.cmd('Bosana --socket-path ' .. path)
+            assert(not buffer.get().options.manager)
+            vim.g.session_restored = true
+          end)
+        end,
+      })
+    ]]
+  )
+end)
+
+t.test("manager close protects unsaved buffers and bang exits the whole editor", function()
+  manager_child(
+    [[
+      local bosana = require('bosana')
+      local bufnr = vim.api.nvim_get_current_buf()
+      vim.cmd('new')
+      local other = vim.api.nvim_get_current_buf()
+      vim.api.nvim_buf_set_lines(other, 0, -1, false, { 'unsaved file edits' })
+      vim.cmd('wincmd p')
+      vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, { 'unsaved manager edits' })
+      local success, err = bosana.close()
+      assert(not success and err:find('Unsaved edits', 1, true))
+      assert(vim.api.nvim_get_current_buf() == bufnr)
+      assert(vim.bo[bufnr].modified)
+      vim.bo[bufnr].modified = false
+      local ok = pcall(bosana.close)
+      assert(not ok, 'Close must refuse unsaved edits in other buffers')
+      assert(vim.api.nvim_get_current_buf() == bufnr)
+      assert(vim.bo[other].modified)
+      vim.bo[bufnr].modified = true
+      vim.g.manager_ready = true
+    ]],
+    "lua if vim.g.manager_ready then vim.cmd('BosanaClose!') end; vim.cmd('cquit 1')"
+  )
 end)
 
 t.test("partial failure refreshes actual state and permits a safe retry", function()

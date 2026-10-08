@@ -299,7 +299,7 @@ function M.close(bufnr, force)
     return nil, "Unsaved edits; write them or use :BosanaClose! to discard them"
   end
   if state.options.manager then
-    vim.cmd(force and "quit!" or "quit")
+    vim.cmd(force and "quitall!" or "quitall")
     return true
   end
   if vim.api.nvim_get_current_buf() == state.bufnr then

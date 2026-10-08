@@ -10,7 +10,23 @@ local function checked(message, value)
 end
 
 vim.api.nvim_create_user_command("Bosana", function(args)
-  checked("Could not open tmux sessions.", require("bosana").command(args.fargs))
+  local bufnr = require("bosana").command(args.fargs)
+  checked("Could not open tmux sessions.", bufnr)
+  local state = require("bosana.buffer").get(bufnr)
+  if state and state.options.manager and vim.v.vim_did_enter == 0 then
+    -- -c runs before VimEnter. Session plugins can replace/wipe the view in a
+    -- scheduled VimEnter callback, so restore the requested manager afterwards.
+    local group = vim.api.nvim_create_augroup("BosanaManagerStartup", { clear = true })
+    vim.api.nvim_create_autocmd("VimEnter", {
+      group = group,
+      once = true,
+      callback = function()
+        vim.schedule(function()
+          checked("Could not open tmux sessions.", require("bosana").command(args.fargs))
+        end)
+      end,
+    })
+  end
 end, {
   nargs = "*",
   desc = "Edit tmux sessions and windows",
