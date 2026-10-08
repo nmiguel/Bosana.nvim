@@ -287,6 +287,41 @@ function M.refresh(bufnr, force)
   return true
 end
 
+function M.switch(bufnr)
+  local state = M.get(bufnr)
+  if not state then
+    return nil, "Current buffer is not a Bosana buffer"
+  end
+  if writing then
+    return nil, "A Bosana write is already in progress"
+  end
+  if vim.api.nvim_get_current_buf() ~= state.bufnr then
+    return nil, "The Bosana buffer must be current to switch to an entry"
+  end
+  local row = vim.api.nvim_win_get_cursor(0)[1]
+  local line = vim.api.nvim_buf_get_lines(state.bufnr, row - 1, row, false)[1] or ""
+  local id = line:match("^/([%$@]%d+) ")
+  local entry = id and (state.baseline.by_session[id] or state.baseline.by_window[id])
+  if not entry or state.baseline.excluded[entry.session_id or id] then
+    return nil, "Current line is not a known tmux session or window"
+  end
+  if state.options.manager then
+    for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+      if vim.bo[buf].modified then
+        return nil, "Unsaved edits; write or discard them before switching from manager mode"
+      end
+    end
+  end
+  local success, err = state.client:switch(id)
+  if not success then
+    return nil, err
+  end
+  if state.options.manager then
+    vim.cmd("quitall")
+  end
+  return true
+end
+
 function M.close(bufnr, force)
   local state = M.get(bufnr)
   if not state then
@@ -462,6 +497,7 @@ function M.create(client, snapshot, options, key)
               local success = fn(bufnr)
               if not success then
                 local messages = {
+                  switch = "Could not switch to the tmux entry.",
                   save = "Could not save changes.",
                   refresh = "Could not refresh tmux sessions.",
                   close = "Could not close the buffer.",

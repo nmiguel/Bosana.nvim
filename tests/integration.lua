@@ -55,6 +55,35 @@ local function manager_child(edit, final_command, startup)
   t.ok(model.same(t.ok(client:snapshot()), baseline))
 end
 
+local function with_attached_host(client, baseline, path, callback)
+  local host = baseline.sessions[#baseline.sessions]
+  local process = vim.system(
+    { "tmux", "-S", path, "-C", "attach-session", "-t", host.id },
+    { text = true, stdin = true, env = { TMUX = "", TMUX_PANE = "" } }
+  )
+  local original_tmux, original_pane = vim.env.TMUX, vim.env.TMUX_PANE
+  local ok, err = xpcall(function()
+    t.ok(
+      vim.wait(5000, function()
+        local out = client:run({ "list-clients", "-F", "#{session_id}" })
+        return out == host.id .. "\n"
+      end, 10),
+      "Control client did not attach"
+    )
+    vim.env.TMUX = path .. "," .. baseline.server_id:match("^(%d+)") .. ",0"
+    vim.env.TMUX_PANE = t.ok(client:display(host.id .. ":", "#{pane_id}"))
+    callback(host)
+  end, debug.traceback)
+  vim.env.TMUX, vim.env.TMUX_PANE = original_tmux, original_pane
+  process:kill(15)
+  process:wait(5000)
+  t.ok(ok, err)
+end
+
+local function attached_selection(client)
+  return t.ok(client:run({ "list-clients", "-F", "#{session_id}\t#{window_id}" }))
+end
+
 local function confirmation_child(path, line, answer)
   local stderr = {}
   local channel = vim.fn.jobstart({ "nvim", "--embed", "--headless", "-u", "NONE" }, {
@@ -454,6 +483,111 @@ t.test("manager mode resolves the host by pane ID and configures its lifecycle",
   vim.env.TMUX_PANE = original_pane
   vim.env.TMUX = original_tmux
   t.ok(ok, err)
+end)
+
+t.test("Enter switches to a session or window and preserves normal-mode edits", function()
+  local client, baseline, path = t.fixture({ { "a", "b" }, { "host" } })
+  local session = baseline.sessions[1]
+  with_attached_host(client, baseline, path, function()
+    t.ok(client:run({ "select-window", "-t", session.id .. ":" .. session.windows[2].id }))
+    local bufnr = open(path, { preview = false })
+    local lines = buffer.lines(baseline)
+    lines[1] = t.session_line(session, "unsaved-session-name")
+    -- Move a window row in the buffer without moving it in tmux.
+    table.insert(lines, table.remove(lines, 2))
+    lines[#lines] = t.window_line(session.windows[1], "unsaved-window-name")
+    vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
+    vim.api.nvim_win_set_cursor(0, { 1, 0 })
+    vim.cmd('execute "normal \\<CR>"')
+    t.eq(attached_selection(client), session.id .. "\t" .. session.windows[2].id .. "\n")
+    vim.api.nvim_win_set_cursor(0, { #lines, 0 })
+    vim.cmd('execute "normal \\<CR>"')
+    t.eq(attached_selection(client), session.id .. "\t" .. session.windows[1].id .. "\n")
+    t.eq(vim.api.nvim_get_current_buf(), bufnr)
+    t.ok(vim.bo[bufnr].modified)
+    t.eq(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), lines)
+    t.eq(t.ok(client:snapshot()).by_window[session.windows[1].id].name, "a")
+  end)
+end)
+
+t.test("switch follows a window moved externally since opening", function()
+  local client, baseline, path = t.fixture({ { "a", "b" }, { "host" } })
+  local window = baseline.sessions[1].windows[1]
+  with_attached_host(client, baseline, path, function(host)
+    open(path, { preview = false })
+    t.ok(client:run({
+      "move-window",
+      "-d",
+      "-s",
+      window.id,
+      "-t",
+      host.id .. ":",
+    }))
+    vim.api.nvim_win_set_cursor(0, { 2, 0 })
+    t.ok(bosana.switch())
+    t.eq(attached_selection(client), host.id .. "\t" .. window.id .. "\n")
+  end)
+end)
+
+t.test("manager Enter switches before exiting the whole editor", function()
+  for _, row in ipairs({ 1, 3 }) do
+    local client, baseline, path = t.fixture({ { "a", "b" }, { "manager" } })
+    local session = baseline.sessions[1]
+    with_attached_host(client, baseline, path, function()
+      local result = child(path, [[
+        local bufnr = vim.api.nvim_get_current_buf()
+        vim.cmd('new')
+        vim.cmd('wincmd p')
+        assert(vim.api.nvim_get_current_buf() == bufnr)
+        vim.api.nvim_win_set_cursor(0, { ]] .. row .. [[, 0 })
+      ]], [[execute "normal \<CR>" | cquit 1]], {
+        manager = true,
+        env = { TMUX = vim.env.TMUX, TMUX_PANE = vim.env.TMUX_PANE },
+      })
+      t.eq(result.code, 0, result.stderr)
+      local window = session.windows[row == 1 and 1 or 2]
+      t.eq(attached_selection(client), session.id .. "\t" .. window.id .. "\n")
+    end)
+  end
+end)
+
+t.test("manager switch protects edits and stays open when tmux switching fails", function()
+  local client, baseline, path = t.fixture({ { "work" }, { "manager" } })
+  with_attached_host(client, baseline, path, function(host)
+    local result = child(
+      path,
+      nil,
+      [[lua
+      local bosana = require('bosana')
+      local bufnr = vim.api.nvim_get_current_buf()
+      local original = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+      vim.api.nvim_buf_set_lines(bufnr, 0, 1, false, { original[1] .. '-pending' })
+      local ok, err = bosana.switch()
+      assert(not ok and err:find('Unsaved edits', 1, true))
+      vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, original)
+      vim.bo[bufnr].modified = false
+      vim.cmd('new')
+      local other = vim.api.nvim_get_current_buf()
+      vim.api.nvim_buf_set_lines(other, 0, -1, false, { 'unsaved file' })
+      vim.cmd('wincmd p')
+      ok, err = bosana.switch()
+      assert(not ok and err:find('Unsaved edits', 1, true))
+      vim.bo[other].modified = false
+      local state = require('bosana.buffer').get()
+      assert(state.client:run({ 'kill-session', '-t', state.baseline.sessions[1].id }))
+      ok, err = bosana.switch()
+      assert(not ok and err)
+      assert(vim.api.nvim_get_current_buf() == bufnr)
+      vim.cmd('qa!')
+    ]],
+      {
+        manager = true,
+        env = { TMUX = vim.env.TMUX, TMUX_PANE = vim.env.TMUX_PANE },
+      }
+    )
+    t.eq(result.code, 0, result.stderr)
+    t.eq(attached_selection(client), host.id .. "\t" .. host.windows[1].id .. "\n")
+  end)
 end)
 
 t.test("host exclusion outside tmux returns a useful error", function()

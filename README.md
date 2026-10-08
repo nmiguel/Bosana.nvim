@@ -15,6 +15,12 @@ Rename entries by editing their names, delete them with `dd`, and move windows
 with linewise cut/paste. **`:w` previews the actions and asks for confirmation
 before applying the changes to tmux.**
 
+Press **Enter** on a session or window to switch the hosting tmux client to it.
+Normal mode keeps Neovim and pending edits open. Manager mode quits Neovim after
+switching; write or discard any unsaved edits first. Switching requires running
+inside a tmux pane on the selected server with an attached client. Unsaved names
+and moves do not affect navigation: Enter follows the entry's native ID.
+
 ## Requirements and installation
 
 - Neovim 0.10+.
@@ -176,6 +182,7 @@ existing one. `--manager`:
   when Neovim exits, provided it still contains only that window.
 - Makes the buffer's `q` mapping quit the editor rather than return to another
   Neovim buffer. Unsaved edits still need to be written or explicitly discarded.
+- Makes Enter switch to the selected entry and then quit the editor.
 
 If you delete all other sessions, quitting the manager ends the final session.
 Host detection verifies the selected server against `$TMUX`; a reused pane ID
@@ -207,7 +214,8 @@ nvim -u NONE \
 | `:e!`                            | Discard edits and load current tmux state                          |
 | `:BosanaClose[!]`                | Close; bang discards edits                                         |
 
-Default buffer mappings: `q` closes, `<C-l>` refreshes, and `g?` opens help.
+Default buffer mappings: `<CR>` switches to the entry under the cursor, `q`
+closes, `<C-l>` refreshes, and `g?` opens help.
 Plugin managers usually generate help tags automatically. For a manually loaded
 checkout, run `:helptags /path/to/bosana/doc` before using `:help bosana`.
 
@@ -225,6 +233,7 @@ require("bosana").setup({
   confirm = true,
   preview = true,
   keymaps = {
+    ["<CR>"] = "switch",
     ["q"] = "close",
     ["<C-l>"] = "refresh",
     ["g?"] = "help",
@@ -244,6 +253,7 @@ automation. Both `require("bosana")` and `require("Bosana")` expose the same API
 local bosana = require("bosana")
 local bufnr, err = bosana.open({ socket_path = "/tmp/work.sock" })
 local ok, err = bosana.save(bufnr) -- Defaults to the current buffer.
+local ok, err = bosana.switch(bufnr) -- Switch to the row under the cursor.
 local ok, err = bosana.refresh({ bufnr = bufnr, force = false })
 local ok, err = bosana.close({ bufnr = bufnr, force = false })
 local state = bosana.get_state(bufnr) -- Copy of baseline and last execution report.

@@ -82,6 +82,25 @@ t.test("icons can be disabled and icon/confirmation configuration is validated",
   end
 end)
 
+t.test("switch rejects unknown rows without changing the buffer", function()
+  local _, _, path = t.fixture({ { "a" } })
+  local bufnr = open(path, { preview = false })
+  for _, line in ipairs({ "", "new entry", "/@999999     unknown", "/$999999 unknown" }) do
+    vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, { line })
+    local success, err = bosana.switch()
+    t.eq(success, nil)
+    t.contains(err, "not a known tmux session or window")
+    t.eq(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), { line })
+  end
+end)
+
+t.test("Enter mapping can be disabled or remapped", function()
+  local _, _, path = t.fixture({ { "a" } })
+  open(path, { keymaps = { ["<CR>"] = false, s = "switch" } })
+  t.eq(vim.fn.maparg("<CR>", "n"), "")
+  t.eq(vim.fn.maparg("s", "n", false, true).desc, "Bosana: switch")
+end)
+
 t.test("confirmation summarizes logical changes without temporary commands", function()
   local baseline = t.baseline()
   local desired = t.parse({

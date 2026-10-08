@@ -29,9 +29,17 @@ successfully before exiting; :q! discards pending edits. :e! discards edits and
 loads fresh tmux state.
 
 Default buffer mappings:
+    <CR>    Switch to the session/window under the cursor.
     q       Close (refuses unsaved edits).
     CTRL-L  Refresh (refuses unsaved edits).
     g?      Open this help.
+
+Enter switches the hosting tmux client to the selected entry. A session row keeps
+that session's active window; a window row selects that window. Normal mode keeps
+Neovim and pending edits open. Manager mode quits Neovim after switching and
+refuses unsaved edits in any buffer. Switching requires running inside a tmux
+pane on the selected server with an attached client. Native IDs keep navigation
+correct during unsaved renames and moves; switching does not apply those edits.
 
 =============================================================================
 EDITING                                                     *bosana-editing*
@@ -124,6 +132,7 @@ CONFIGURATION                                               *bosana-configuratio
       confirm = true,
       preview = true,
       keymaps = {
+        ["<CR>"] = "switch",
         ["q"] = "close",
         ["<C-l>"] = "refresh",
         ["g?"] = "help",
@@ -144,6 +153,7 @@ LUA API                                                     *bosana-api*
     local bosana = require("bosana")
     local bufnr, err = bosana.open({ manager = false })
     local ok, err = bosana.save(bufnr)
+    local ok, err = bosana.switch(bufnr)
     local ok, err = bosana.refresh({ bufnr = bufnr, force = false })
     local ok, err = bosana.close({ bufnr = bufnr, force = false })
     local state = bosana.get_state(bufnr)
@@ -153,6 +163,8 @@ nil,error; setup() raises invalid configuration errors. Buffer arguments default
 to the current buffer. get_state() returns a copy of the baseline, blocked flag,
 buffer number, and last execution report, or nil outside a Bosana buffer.
 save() uses the same confirmation as :w unless confirm=false is configured.
+switch() uses the cursor row in the current Bosana buffer and exits in manager
+mode only after a successful switch.
 
 =============================================================================
 DEDICATED TMUX SESSION                                      *bosana-manager*
@@ -175,7 +187,8 @@ Suggested tmux.conf hotkey: >
 Prefix+B creates/switches to the manager session, or reuses it. --manager resolves
 the host by pane/session ID, excludes it from rendering and mutations, sets its
 detach-on-destroy=off, and sets its window's remain-on-exit=off. q quits Neovim in
-manager mode. Closing the final manager window removes its session; the client
+manager mode. Enter switches to the selected entry and then quits Neovim.
+Closing the final manager window removes its session; the client
 switches to a surviving session, or exits if there are none.
 
 --exclude-host-session only performs exclusion. Host detection requires $TMUX

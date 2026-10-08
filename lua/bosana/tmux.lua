@@ -121,7 +121,7 @@ function Client:host()
   local pane = vim.env.TMUX_PANE
   local origin = vim.env.TMUX and vim.env.TMUX:match("^(.*),%d+,%d+$")
   if not pane or not pane:match("^%%%d+$") or not origin then
-    return nil, "Host-session exclusion requires running inside a tmux pane"
+    return nil, "Host detection requires running inside a tmux pane"
   end
   local out, err = self:display(pane, "#{session_id}\t#{window_id}\t#{socket_path}")
   if not out then
@@ -136,6 +136,37 @@ function Client:host()
     return nil, "The selected tmux server is not the server hosting this Neovim instance"
   end
   return { session_id = session, window_id = window }
+end
+
+function Client:switch(id)
+  local host, err = self:host()
+  if not host then
+    return nil, err
+  end
+  local client
+  client, err = self:display(host.session_id .. ":" .. host.window_id, "#{client_name}")
+  if not client then
+    return nil, err
+  end
+  if client == "" then
+    return nil, "No tmux client is attached to the hosting session"
+  end
+  local target = id
+  if id:sub(1, 1) == "@" then
+    local session
+    session, err = self:display(id, "#{session_id}")
+    if not session then
+      return nil, err
+    end
+    -- A window may have moved since opening; resolve its live session by ID.
+    target = session .. ":" .. id
+  end
+  local out
+  out, err = self:run({ "switch-client", "-c", client, "-t", target })
+  if out == nil then
+    return nil, err
+  end
+  return true
 end
 
 function Client:name(target, kind)

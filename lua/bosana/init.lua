@@ -83,6 +83,10 @@ function M.save(bufnr)
   return buffer.save(bufnr)
 end
 
+function M.switch(bufnr)
+  return buffer.switch(bufnr)
+end
+
 function M.refresh(opts)
   opts = opts or {}
   return buffer.refresh(opts.bufnr, opts.force)

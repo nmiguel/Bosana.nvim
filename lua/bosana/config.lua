@@ -11,6 +11,7 @@ M.defaults = {
   confirm = true,
   preview = true,
   keymaps = {
+    ["<CR>"] = "switch",
     ["q"] = "close",
     ["<C-l>"] = "refresh",
     ["g?"] = "help",
@@ -65,13 +66,13 @@ function M.validate(opts)
   if opts.keymaps ~= false and type(opts.keymaps) ~= "table" then
     error("keymaps must be a table or false", 0)
   end
-  local actions = { close = true, refresh = true, save = true, help = true }
+  local actions = { switch = true, close = true, refresh = true, save = true, help = true }
   for lhs, action in pairs(opts.keymaps or {}) do
     if type(lhs) ~= "string" or lhs == "" then
       error("Keymap keys must be nonempty strings", 0)
     end
     if action ~= false and type(action) ~= "function" and not actions[action] then
-      error("Keymap actions must be close, refresh, save, help, a function, or false", 0)
+      error("Keymap actions must be switch, close, refresh, save, help, a function, or false", 0)
     end
   end
   return opts
