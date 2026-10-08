@@ -214,7 +214,7 @@ function Client:snapshot(excluded)
       return nil, "Malformed tmux session listing"
     end
     if grouped == "1" and not state.excluded[id] then
-      return nil, "Grouped sessions are not supported in this version (" .. id .. ")"
+      return nil, "Grouped sessions are not supported (" .. id .. ")"
     end
     local name, name_err = self:name(id .. ":", "session")
     if not name then
@@ -234,7 +234,7 @@ function Client:snapshot(excluded)
       return nil, "tmux state changed while listing windows; refresh and try again"
     end
     if state.by_window[id] then
-      return nil, "Linked/shared windows are not supported in this version (" .. id .. ")"
+      return nil, "Linked/shared windows are not supported (" .. id .. ")"
     end
     local name, name_err = self:name(session_id .. ":" .. id, "window")
     if not name then

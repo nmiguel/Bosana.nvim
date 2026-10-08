@@ -56,7 +56,7 @@ t.test("missing tmux on PATH prevents spawning and reports an actionable command
   end)
 end)
 
-t.test("the removed tmux configuration option is rejected", function()
+t.test("configuring the tmux executable is rejected", function()
   local executable = t.ok(tmux.check_executable())
   local bufnr, err = bosana.open({ tmux = executable })
   t.eq(bufnr, nil)
@@ -129,7 +129,7 @@ t.test("health reports missing tmux before attempting any process", function()
 end)
 
 t.test("health treats an empty server as informational and does not start it", function()
-  local path = "/tmp/opencode/bosana-health-empty-" .. vim.fn.getpid() .. ".sock"
+  local path = vim.fn.tempname() .. ".sock"
   bosana.setup({ socket_path = path })
   local messages = health_report()
   t.eq(report_text(messages, "error"), "")

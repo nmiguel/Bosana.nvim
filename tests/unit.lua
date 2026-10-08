@@ -4,13 +4,13 @@ local parser = require("bosana.parser")
 local planner = require("bosana.planner")
 local model = require("bosana.model")
 
-t.test("notes example 1: delete a session", function()
+t.test("removing a session block plans session deletion", function()
   local baseline = t.baseline()
   local desired = t.parse({ "/$1 one", "/@1     a", "/@2     b", "/@3     c" }, baseline)
   t.eq(planner.plan(baseline, desired), { { kind = "kill_session", id = "$2" } })
 end)
 
-t.test("notes example 2: transfer a window", function()
+t.test("moving a window between sessions plans a transfer", function()
   local baseline = t.baseline()
   local desired = t.parse({
     "/$1 one",
@@ -28,7 +28,7 @@ t.test("notes example 2: transfer a window", function()
   t.eq(desired.by_window["@4"].session_id, "$1")
 end)
 
-t.test("notes example 3: reorder windows", function()
+t.test("reordering window rows plans relative window order", function()
   local baseline = t.baseline()
   local desired = t.parse({
     "/$1 one",
@@ -46,7 +46,7 @@ t.test("notes example 3: reorder windows", function()
   )
 end)
 
-t.test("notes example 4: reject duplicate IDs", function()
+t.test("duplicate window IDs report the offending line", function()
   local baseline = t.baseline()
   local lines = buffer.lines(baseline)
   table.insert(lines, 6, lines[6])
@@ -56,7 +56,7 @@ t.test("notes example 4: reject duplicate IDs", function()
   t.eq(errors[1].lnum, 6)
 end)
 
-t.test("notes example 5: delete session two's first window", function()
+t.test("removing a window row plans deletion in its owning session", function()
   local baseline = t.baseline()
   local lines = buffer.lines(baseline)
   table.remove(lines, 6)

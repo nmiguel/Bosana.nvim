@@ -18,7 +18,7 @@ before applying the changes to tmux.**
 ## Requirements and installation
 
 - Neovim 0.10+.
-- tmux on `PATH` (developed and tested with tmux 3.8-rc3).
+- tmux on `PATH`.
 
 For a local checkout with lazy.nvim:
 
@@ -182,13 +182,13 @@ Host detection verifies the selected server against `$TMUX`; a reused pane ID
 on a different server cannot accidentally identify the host.
 
 To exclude the host without changing its lifecycle, use
-`:Bosana --exclude-host-session`. The separate CLI launcher script is deferred.
+`:Bosana --exclude-host-session`.
 
 For a checkout that is not installed in your Neovim configuration:
 
 ```sh
 nvim -u NONE \
-  --cmd 'set runtimepath^=/home/nomig/projects/personal/bosana' \
+  --cmd 'set runtimepath^=/path/to/bosana' \
   -c 'runtime plugin/bosana.lua' \
   -c 'Bosana'
 ```

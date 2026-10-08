@@ -59,8 +59,8 @@ Successful writes refresh state and clear undo history. Undo cannot restore
 obsolete IDs after a save. Invalid writes show a short error-styled message and
 refresh the buffer from tmux, discarding the invalid edits.
 
-Unsupported in this version: creation, pane editing, linked/shared windows,
-grouped sessions, duplicate IDs, control characters in names, empty names,
+Unsupported: creation, pane editing, linked/shared windows, grouped sessions,
+duplicate IDs, control characters in names, empty names,
 surrounding whitespace in names, and session names containing '.' or ':'.
 Window names may repeat; retained session names must be unique. Blank rows are
 ignored. Window indentation must be exactly four spaces, not tabs.
@@ -179,8 +179,7 @@ manager mode. Closing the final manager window removes its session; the client
 switches to a surviving session, or exits if there are none.
 
 --exclude-host-session only performs exclusion. Host detection requires $TMUX
-and $TMUX_PANE and verifies the selected server. The separate launcher script
-is deferred; the hotkey uses Neovim directly.
+and $TMUX_PANE and verifies the selected server.
 
 =============================================================================
 RECOVERY                                                    *bosana-recovery*

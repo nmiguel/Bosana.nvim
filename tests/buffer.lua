@@ -65,7 +65,7 @@ t.test("icons follow linewise edits and undo without entering names", function()
   check_icons()
 end)
 
-t.test("icons can be disabled and stage-two configuration is validated", function()
+t.test("icons can be disabled and icon/confirmation configuration is validated", function()
   local _, _, path = t.fixture({ { "a" } })
   local bufnr = open(path, { icons = false })
   local ns = vim.api.nvim_get_namespaces()["bosana.icons"]

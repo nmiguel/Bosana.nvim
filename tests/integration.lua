@@ -120,7 +120,7 @@ t.test("real no-op writes execute no mutations", function()
   t.ok(model.same(actual, baseline))
 end)
 
-t.test("real example 1: delete a session", function()
+t.test("removing a session block deletes the tmux session", function()
   local client, baseline = t.fixture()
   local first = baseline.sessions[1]
   local lines = { t.session_line(first) }
@@ -132,7 +132,7 @@ t.test("real example 1: delete a session", function()
   t.eq(actual.sessions[1].id, first.id)
 end)
 
-t.test("real example 2: transfer to the end of another session", function()
+t.test("moving a window row transfers it to the end of another session", function()
   local client, baseline = t.fixture()
   local lines = buffer.lines(baseline)
   local moved = table.remove(lines, 6)
@@ -142,7 +142,7 @@ t.test("real example 2: transfer to the end of another session", function()
   t.eq(#actual.sessions[2].windows, 2)
 end)
 
-t.test("real example 3: move a window to the last position", function()
+t.test("moving a window row to the end reorders the tmux windows", function()
   local client, baseline = t.fixture()
   local lines = buffer.lines(baseline)
   table.insert(lines, table.remove(lines, 6))
@@ -150,7 +150,7 @@ t.test("real example 3: move a window to the last position", function()
   t.eq(actual.sessions[2].windows[3].id, baseline.sessions[2].windows[1].id)
 end)
 
-t.test("real example 4: duplicate IDs cannot mutate tmux", function()
+t.test("duplicate IDs cannot mutate tmux", function()
   local client, baseline, path = t.fixture()
   local bufnr = open(path)
   local lines = buffer.lines(baseline)
@@ -201,7 +201,7 @@ t.test("creating an entry shows a short styled error and restores a usable buffe
   t.eq(t.ok(client:snapshot()).sessions[1].windows[1].name, "retry")
 end)
 
-t.test("real example 5: delete an individual window", function()
+t.test("removing a window row deletes only that tmux window", function()
   local client, baseline = t.fixture()
   local lines = buffer.lines(baseline)
   local id = baseline.sessions[2].windows[1].id
@@ -277,7 +277,7 @@ end)
 
 t.test("Unicode and shell punctuation stay literal in window names", function()
   local client, baseline = t.fixture()
-  local marker = "/tmp/opencode/bosana-injection-" .. vim.fn.getpid()
+  local marker = vim.fn.tempname()
   local name = "λ 日本語 ; $(touch "
     .. marker
     .. ") #(touch "

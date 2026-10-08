@@ -90,14 +90,7 @@ function M.parse(lines, baseline)
 end
 
 function M.fixture(names)
-  M.fixture_serial = (M.fixture_serial or 0) + 1
-  local path = "/tmp/opencode/bosana-tests-"
-    .. vim.fn.getpid()
-    .. "-"
-    .. M.total
-    .. "-"
-    .. M.fixture_serial
-    .. ".sock"
+  local path = vim.fn.tempname() .. ".sock"
   local client = tmux.new({ socket_path = path })
   M.fixtures[#M.fixtures + 1] = client
   for i, windows in ipairs(names or { { "a", "b", "c" }, { "d", "e", "f" } }) do
