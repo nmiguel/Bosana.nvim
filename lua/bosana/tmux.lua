@@ -207,6 +207,36 @@ function Client:windows(session_id)
   return windows
 end
 
+function Client:creation_args(operation)
+  local args = {
+    operation.kind == "create_session" and "new-session" or "new-window",
+    "-d",
+    "-P",
+    "-F",
+    "#{pid}\t#{start_time}\t#{socket_path}\t#{session_id}\t#{window_id}",
+  }
+  local name
+  if operation.kind == "create_session" then
+    vim.list_extend(args, { "-s", (operation.name:gsub("#", "##")) })
+    name = operation.window.name
+  else
+    vim.list_extend(args, { "-t", operation.session .. ":" .. operation.index })
+    name = operation.name
+  end
+  if name then
+    vim.list_extend(args, { "-n", (name:gsub("#", "##")) })
+  end
+  return args
+end
+
+function M.creation_result(out)
+  local server, session, window = out:match("^(%d+\t[^\t]+\t.-)\t(%$%d+)\t(@%d+)\n?$")
+  if not server then
+    return nil, "Malformed tmux creation result"
+  end
+  return { server_id = server, session_id = session, window_id = window }
+end
+
 function Client:snapshot(excluded)
   local session_format = "#{session_id}\t#{session_grouped}"
   local window_format = "#{session_id}\t#{window_id}\t#{window_index}\t#{window_active}"

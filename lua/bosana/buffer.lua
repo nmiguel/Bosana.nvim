@@ -1,4 +1,5 @@
 local parser = require("bosana.parser")
+local model = require("bosana.model")
 local planner = require("bosana.planner")
 local executor = require("bosana.executor")
 local confirmation = require("bosana.confirmation")
@@ -9,6 +10,7 @@ local states = {}
 local namespace = vim.api.nvim_create_namespace("bosana")
 local icon_namespace = vim.api.nvim_create_namespace("bosana.icons")
 local writing = false
+local pending_switch = "New entry has not been created yet; save with :w before switching"
 
 function M.lines(snapshot)
   local lines = {}
@@ -49,11 +51,8 @@ local function windows_for(bufnr)
 end
 
 local function name_column(line)
-  local prefix = line:match("^/[%$@]%d+ ")
-  if not prefix then
-    return 0
-  end
-  return #prefix + (line:sub(2, 2) == "@" and 4 or 0)
+  local entry = parser.row(line)
+  return entry and entry.column or 0
 end
 
 local function render_icons(state)
@@ -63,11 +62,14 @@ local function render_icons(state)
     return
   end
   for row, line in ipairs(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)) do
-    local kind = line:match("^/([%$@])%d+ ")
-    local icon = kind and state.options.icons[kind == "$" and "session" or "window"]
+    local entry = parser.row(line)
+    local kind = entry and entry.kind
+    local icon = kind and state.options.icons[kind]
     if icon and icon ~= "" and name_column(line) < #line then
       vim.api.nvim_buf_set_extmark(bufnr, icon_namespace, row - 1, name_column(line), {
-        virt_text = { { icon .. " ", kind == "$" and "BosanaSessionIcon" or "BosanaWindowIcon" } },
+        virt_text = {
+          { icon .. " ", kind == "session" and "BosanaSessionIcon" or "BosanaWindowIcon" },
+        },
         virt_text_pos = "inline",
       })
     end
@@ -152,13 +154,16 @@ local function mark_special(bufnr)
   vim.bo[bufnr].buflisted = false
 end
 
-local function render(state, snapshot)
+local function render(state, snapshot, created_rows)
   local bufnr = state.bufnr
   local cursors = {}
   for _, win in ipairs(windows_for(bufnr)) do
     local cursor = vim.api.nvim_win_get_cursor(win)
     local line = vim.api.nvim_buf_get_lines(bufnr, cursor[1] - 1, cursor[1], false)[1] or ""
-    cursors[win] = { id = line:match("^/([%$@]%d+) "), row = cursor[1] }
+    cursors[win] = {
+      id = line:match("^/([%$@]%d+) ") or (created_rows and created_rows[cursor[1]]),
+      row = cursor[1],
+    }
   end
   local lines = M.lines(snapshot)
   local undo = vim.bo[bufnr].undolevels
@@ -238,7 +243,7 @@ function M.save(bufnr)
       report.message = execution_err
       return nil, execution_err
     end
-    render(state, actual)
+    render(state, actual, report.created.rows)
     return true
   end)
   if not ok then
@@ -301,6 +306,10 @@ function M.switch(bufnr)
   local row = vim.api.nvim_win_get_cursor(0)[1]
   local line = vim.api.nvim_buf_get_lines(state.bufnr, row - 1, row, false)[1] or ""
   local id = line:match("^/([%$@]%d+) ")
+  local pending = parser.row(line)
+  if pending and not pending.id and not model.name_error(pending.name, pending.kind) then
+    return nil, pending_switch
+  end
   local entry = id and (state.baseline.by_session[id] or state.baseline.by_window[id])
   if not entry or state.baseline.excluded[entry.session_id or id] then
     return nil, "Current line is not a known tmux session or window"
@@ -494,7 +503,7 @@ function M.create(client, snapshot, options, key)
                 message.error("Unknown action.")
                 return
               end
-              local success = fn(bufnr)
+              local success, err = fn(bufnr)
               if not success then
                 local messages = {
                   switch = "Could not switch to the tmux entry.",
@@ -502,7 +511,11 @@ function M.create(client, snapshot, options, key)
                   refresh = "Could not refresh tmux sessions.",
                   close = "Could not close the buffer.",
                 }
-                message.error(messages[action] or "Could not complete the action.")
+                message.error(
+                  err == pending_switch and "Save with :w before switching to a new entry."
+                    or messages[action]
+                    or "Could not complete the action."
+                )
               end
             end
           end

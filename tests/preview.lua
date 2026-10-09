@@ -137,6 +137,36 @@ t.test("preview hides on session and invalid rows and cleans up when leaving", f
   t.eq(vim.api.nvim_buf_is_valid(preview_buf), false)
 end)
 
+t.test(
+  "new window rows hide previews until saved and then capture their created native ID",
+  function()
+    local client, baseline, path = t.fixture({ { "a" } })
+    t.ok(client:run({ "set-option", "-g", "default-command", "sleep 3600" }))
+    local bufnr = t.ok(bosana.open({ socket_path = path }))
+    local preview = buffer.get(bufnr).preview
+    move(2)
+    t.ok(preview.win)
+    vim.api.nvim_buf_set_lines(bufnr, 2, 2, false, { "    created" })
+    move(3)
+    t.eq(preview.win, nil)
+    t.eq(vim.bo[bufnr].modified, true)
+    t.ok(model.same(t.ok(client:snapshot()), baseline))
+    t.ok(bosana.save())
+    local id = bosana.get_state().last_report.created.rows[3]
+    t.ok(
+      vim.wait(3000, function()
+        return preview.win and not preview.pending and not preview.process
+      end, 10),
+      "Created window preview did not finish its initial capture"
+    )
+    t.eq(preview.target, id)
+    emit(client, id, "CREATED_WINDOW")
+    vim.api.nvim_exec_autocmds("CursorHold", { buffer = bufnr })
+    wait_content(preview, "CREATED_WINDOW")
+    t.eq(preview.target, id)
+  end
+)
+
 t.test("preview ignores cancelled results and never reopens after buffer deletion", function()
   local requests, kills = {}, 0
   local client = {

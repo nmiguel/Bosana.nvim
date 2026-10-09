@@ -196,11 +196,11 @@ t.test("duplicate IDs cannot mutate tmux", function()
   t.ok(model.same(t.ok(client:snapshot()), baseline))
 end)
 
-t.test("creating an entry shows a short styled error and restores a usable buffer", function()
+t.test("a malformed ID shows a short styled error and restores a usable buffer", function()
   local client, baseline, path = t.fixture({ { "a" } })
   local bufnr = open(path)
   local lines = buffer.lines(baseline)
-  lines[#lines + 1] = "new session"
+  lines[#lines + 1] = "/$oops new session"
   vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
   local original_echo, messages = vim.api.nvim_echo, {}
   vim.api.nvim_echo = function(chunks, history, opts)
@@ -1010,6 +1010,39 @@ t.test("direct startup and :wq complete mutations before exiting", function()
     child(path, "vim.api.nvim_buf_set_lines(0, 1, 2, false, { " .. vim.inspect(line) .. " })", "wq")
   t.eq(result.code, 0, result.stderr)
   t.eq(t.ok(client:snapshot()).sessions[1].windows[1].name, "saved-before-exit")
+end)
+
+t.test(":wq completes new session and window creation before exiting", function()
+  local client, _, path = t.fixture({ { "a" } })
+  t.ok(client:run({ "set-option", "-g", "default-command", "sleep 3600" }))
+  local result = child(
+    path,
+    [[vim.api.nvim_buf_set_lines(0, -1, -1, false, { 'new', '    first', '    second' })]],
+    "wq"
+  )
+  t.eq(result.code, 0, result.stderr)
+  local actual = t.ok(client:snapshot())
+  t.eq(#actual.sessions, 2)
+  t.eq(actual.sessions[2].name, "new")
+  t.eq(#actual.sessions[2].windows, 2)
+end)
+
+t.test("manager creation excludes the host and does not switch its attached client", function()
+  local client, baseline, path = t.fixture({ { "work" }, { "manager" } })
+  t.ok(client:run({ "set-option", "-g", "default-command", "sleep 3600" }))
+  with_attached_host(client, baseline, path, function(host)
+    local selected = attached_selection(client)
+    local bufnr = open(path, { manager = true })
+    local lines = buffer.lines(bosana.get_state().baseline)
+    vim.list_extend(lines, { "created", "    shell" })
+    vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
+    t.ok(bosana.save())
+    local actual = t.ok(client:snapshot())
+    t.eq(actual.by_session[host.id], baseline.by_session[host.id])
+    t.eq(attached_selection(client), selected)
+    t.eq(#actual.sessions, 3)
+    t.eq(actual.sessions[3].name, "created")
+  end)
 end)
 
 t.test("failed :wq stays in the refreshed editor", function()

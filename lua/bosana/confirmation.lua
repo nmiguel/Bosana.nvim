@@ -1,12 +1,39 @@
 local M = {}
 
 local function label(entry)
-  return string.format("%q (%s)", entry.name, entry.id)
+  return string.format("%q (%s)", entry.name, entry.new and "new" or entry.id)
 end
 
 -- Describe user-visible changes, rather than temporary renames and links.
 function M.actions(baseline, desired)
   local actions = {}
+  for _, session in ipairs(desired.sessions) do
+    if session.new then
+      actions[#actions + 1] = string.format(
+        "Create session %q%s",
+        session.name,
+        session.windows[1].implicit and " with a default window" or ""
+      )
+    end
+    for i, window in ipairs(session.windows) do
+      local original = baseline.by_window[window.id]
+      if window.new and not window.implicit then
+        actions[#actions + 1] = string.format(
+          "Create window %q in session %s at position %d",
+          window.name,
+          label(session),
+          i
+        )
+      elseif session.new and original and original.name ~= window.name then
+        actions[#actions + 1] = string.format(
+          "Rename window %s in %s to %q",
+          label(original),
+          label(session),
+          window.name
+        )
+      end
+    end
+  end
   for _, session in ipairs(baseline.sessions) do
     if not baseline.excluded[session.id] then
       for _, window in ipairs(session.windows) do
@@ -59,7 +86,7 @@ function M.actions(baseline, desired)
         end
         for _, window in ipairs(wanted.windows) do
           local original = baseline.by_window[window.id]
-          if original.name ~= window.name then
+          if original and original.name ~= window.name then
             actions[#actions + 1] = string.format(
               "Rename window %s in %s to %q",
               label(original),
@@ -67,7 +94,7 @@ function M.actions(baseline, desired)
               window.name
             )
           end
-          if original.session_id == session.id then
+          if original and original.session_id == session.id then
             after[#after + 1] = window.id
           end
         end

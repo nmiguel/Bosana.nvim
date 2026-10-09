@@ -50,14 +50,35 @@ Icons are inline virtual text, not editable name characters. They follow edits
 and undo without entering clipboard contents or tmux names.
 
 Rename by editing the name with cw, C, A, or a substitution. Keep the hidden
-prefix intact; cc removes it. IDs travel with linewise cut/paste and undo.
+prefix intact; cc removes it and turns a rename into deletion plus creation.
+IDs travel with linewise cut/paste and undo.
 
     Edit name                  Rename session/window.
+    Add unindented name         Create session.
+    Add four-space-indented name
+                               Create window beneath the preceding session.
     Remove window row          Delete window.
     Move beneath a session     Transfer window.
     Reorder window rows        Reorder windows, preserving index slots/gaps.
-    Remove/empty a session     Delete session; first preserve moved-out windows.
+    Remove/empty existing session
+                               Delete session; first preserve moved-out windows.
     Reorder session blocks     No effect.
+
+New rows have no ID until saved. For example: >
+    project
+        editor
+        terminal
+    scratch
+<
+This creates project with two named windows, and scratch with one default window.
+A new header without window rows uses tmux's default window name and normal
+automatic-renaming behavior. Explicit new names disable automatic-rename, as
+new-window -n does. New windows use tmux's configured default command/shell and
+normal working-directory behavior. Existing window rows can also be moved beneath
+a new header; no extra default window remains when windows are explicitly listed.
+Creation is detached. An empty view can create the first sessions on its server.
+Enter on an unsaved new row asks you to save first; previews become available
+after creation. Existing empty headers still mean deletion.
 
 Membership changes honor renumber-windows. Active windows stay selected when
 they survive in their original sessions. Window labels use window_name, not
@@ -67,18 +88,21 @@ Successful writes refresh state and clear undo history. Undo cannot restore
 obsolete IDs after a save. Invalid writes show a short error-styled message and
 refresh the buffer from tmux, discarding the invalid edits.
 
-Unsupported: creation, pane editing, linked/shared windows, grouped sessions,
+Unsupported: pane editing, linked/shared windows, grouped sessions,
 duplicate IDs, control characters in names, empty names,
 surrounding whitespace in names, and session names containing '.' or ':'.
 Window names may repeat; retained session names must be unique. Blank rows are
 ignored. Window indentation must be exactly four spaces, not tabs.
+Prefixes beginning /$ or /@ are reserved for existing native IDs; malformed or
+unknown IDs are rejected rather than treated as new entries.
 
 =============================================================================
 SAVE CONFIRMATION                                           *bosana-confirmation*
 
 Writes with changes show a synchronous Yes/No prompt listing up to five logical
-actions, plus the count of any remaining actions. Temporary renames and links
-are represented by their user-visible rename or move. No-op writes do not prompt.
+actions (including creations), plus the count of any remaining actions. Temporary
+renames and links are represented by their user-visible rename or move. No-op
+writes do not prompt.
 
 Press y to apply; n or Escape cancels. No is the default. Cancellation leaves the
 buffer modified and prevents :wq from exiting. tmux state is checked before and
@@ -208,9 +232,14 @@ been applied. Inspect completed commands, the failed command, and the current
 operation using: >
     :lua =require('bosana').get_state().last_report
 <
+created.ids maps temporary creation references to native IDs; created.rows maps
+explicit new rows (one-based) to those IDs.
+
 After a failed transfer, temporary destination links are removed when the source
 still owns the window; cleanup attempts are recorded in the report. Completed
-transfers and deletions are not rolled back.
+transfers, user-window creations, and deletions are not rolled back. Disposable
+bootstrap windows are also cleaned up when possible. Partly created sessions can
+retain their temporary names; the refreshed buffer lets you rename them.
 
 Inspect the refreshed state and reapply remaining changes. If recovery cannot
 read tmux, the last known snapshot is restored; writes stay blocked if mutations

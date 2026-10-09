@@ -110,7 +110,15 @@ end)
 
 t.test("invalid edits report diagnostics", function()
   local cases = {
-    { { "new session" }, "missing ID" },
+    { { "/$oops new session" }, "Malformed ID" },
+    { { "/@1" }, "Malformed ID" },
+    { { "    orphan" }, "beneath a session" },
+    { { "new", "   bad-indent" }, "four spaces" },
+    { { "new", "     bad-indent" }, "four spaces" },
+    { { "new", "    trailing " }, "whitespace" },
+    { { "bad:name" }, "cannot contain" },
+    { { "new", "    a", "new" }, "Duplicate session name" },
+    { { "/$1 new", "/@1     a", "new" }, "Duplicate session name" },
     { { "/$99 unknown" }, "Unknown ID" },
     { { "/@1     a" }, "beneath a session" },
     { { "/$1 one", "/@1   a" }, "four spaces" },
@@ -129,6 +137,21 @@ t.test("invalid edits report diagnostics", function()
     t.contains(errors[1].message, case[2])
   end
 end)
+
+t.test(
+  "new rows have separate references and only new empty headers get default windows",
+  function()
+    local desired = t.parse({ "/$1 one", "new", "    same", "    same", "default" }, t.baseline())
+    t.eq(#desired.sessions, 2)
+    local session = desired.sessions[1]
+    t.ok(session.new)
+    t.eq(session.name, "new")
+    t.ok(session.windows[1].id ~= session.windows[2].id)
+    t.eq(session.windows[1].session_id, session.id)
+    t.eq(desired.sessions[2].windows[1].implicit, true)
+    t.eq(desired.sessions[2].windows[1].name, nil)
+  end
+)
 
 t.test("exclusions are absent from rendering and all mutation plans", function()
   local baseline = t.baseline()

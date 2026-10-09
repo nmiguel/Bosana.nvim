@@ -11,9 +11,9 @@ Edit tmux sessions and windows as a normal Neovim buffer, inspired by
     ▤ shell
 ```
 
-Rename entries by editing their names, delete them with `dd`, and move windows
-with linewise cut/paste. **`:w` previews the actions and asks for confirmation
-before applying the changes to tmux.**
+Create entries by adding names, rename them by editing their names, delete them
+with `dd`, and move windows with linewise cut/paste. **`:w` previews the actions
+and asks for confirmation before applying the changes to tmux.**
 
 Press **Enter** on a session or window to switch the hosting tmux client to it.
 Normal mode keeps Neovim and pending edits open. Manager mode quits Neovim after
@@ -82,26 +82,50 @@ deletions, pastes, moves, and undo. Internally the example above looks like:
 The space after each ID belongs to the concealed prefix. Window names have four
 additional spaces of indentation. Keep each entry's hidden prefix intact when
 renaming: use `cw`, `C`, `A`, or a substitution on the name instead of replacing
-the entire line with `cc`.
+the entire line with `cc`. Removing the prefix makes the row a new entry: saving
+will delete the original and create its replacement.
 
-| Edit                                  | Result on write                                    |
-| ------------------------------------- | -------------------------------------------------- |
-| Change a session/window name          | Rename that existing entry                         |
-| Remove a window row                   | Delete that window                                 |
-| Move a window beneath another session | Transfer the window to that session                |
-| Reorder window rows within a session  | Reorder the windows                                |
-| Remove a session and its window rows  | Delete the session                                 |
-| Leave an empty session header         | Delete the session                                 |
-| Move windows out of a deleted session | Preserve those windows in their destinations       |
-| Reorder session blocks                | No change; tmux has no corresponding session order |
+| Edit                                   | Result on write                                   |
+| -------------------------------------- | ------------------------------------------------- |
+| Change a session/window name           | Rename that existing entry                        |
+| Add an unindented name                 | Create a session                                  |
+| Add a name indented by four spaces     | Create a window in the preceding session           |
+| Remove a window row                    | Delete that window                                |
+| Move a window beneath another session  | Transfer the window to that session                |
+| Reorder window rows within a session   | Reorder the windows                               |
+| Remove a session and its window rows   | Delete the session                                |
+| Leave an empty existing session header | Delete the session                                |
+| Move windows out of a deleted session  | Preserve those windows in their destinations       |
+| Reorder session blocks                 | No change; tmux has no corresponding session order |
+
+New rows have no IDs until they are saved. For example, append:
+
+```text
+project
+    editor
+    terminal
+scratch
+```
+
+This creates `project` with two named windows, and `scratch` with one default
+window. A new session header without window rows uses tmux's default window name
+and normal automatic-renaming behavior. Explicitly named new windows disable
+automatic renaming, as tmux's `new-window -n` does. New windows use tmux's configured
+default command/shell and normal working-directory behavior.
+
+You can also move existing window rows beneath a new session header; only the
+listed windows remain, with no extra default window. Creation is detached and
+preserves surviving active-window selections. An empty Bosana view can create
+the first sessions on the selected server. Enter on an unsaved new row asks you
+to save first; its preview becomes available after creation.
 
 Use `:w` or `:wq` to apply and exit, and `:q!` to discard pending edits. Writes finish
 before `:wq` exits. Successful writes re-read tmux and reset undo history, so undo
 cannot restore IDs for entries that no longer exist.
 
 Writes with changes show a synchronous **Yes/No** confirmation listing up to five
-logical actions (renames, moves, deletions, or reorders), plus the number of any
-remaining actions. Press `y` to apply or `n`/Escape to cancel; No is the default.
+logical actions (creations, renames, moves, deletions, or reorders), plus the number
+of any remaining actions. Press `y` to apply or `n`/Escape to cancel; No is the default.
 Cancellation keeps your edits and prevents `:wq` from exiting. No-op writes do
 not prompt. tmux state is checked both before and after confirmation.
 
@@ -134,7 +158,8 @@ Set `preview = false` in `setup()` or `open()` to disable it.
 
 ### Editing boundaries
 
-- Edit existing entries only; new ID-less rows are rejected.
+- New rows use no ID prefix. Prefixes beginning `/$` or `/@` are reserved for
+  existing native IDs; malformed or unknown IDs are rejected.
 - No pane editing, linked/shared windows, or grouped sessions.
 - An ID may appear only once, even when the names differ.
 - Window names may repeat; retained session names must be unique.
@@ -143,7 +168,7 @@ Set `preview = false` in `setup()` or `open()` to disable it.
 - Blank lines are ignored. Window rows require exactly four spaces, not tabs.
 
 Invalid edits show a short error-styled message and refresh the buffer from tmux,
-discarding the invalid edits. Creating new sessions or windows is not supported.
+discarding the invalid edits.
 
 ## Direct CLI launch and tmux hotkey
 
@@ -278,10 +303,15 @@ some changes may already have been applied. Inspect the detailed report with:
 ```
 
 The report contains completed command argument arrays, the failed command when
-available, and the operation being processed. After a failed transfer, Bosana
+available, and the operation being processed. `created.ids` maps temporary
+references to new native IDs; `created.rows` maps explicit new buffer rows
+(one-based) to those IDs. After a failed transfer, Bosana
 also attempts to remove its temporary destination links when the original source
 still holds the window; these attempts are recorded in `cleanup`. Completed
-transfers and deletions are not rolled back. Inspect the refreshed state and
+transfers, user-window creations, and deletions are not rolled back. Disposable
+bootstrap windows are also cleaned up when possible. A partly completed session
+creation may retain its temporary name; the refreshed buffer makes it editable.
+Inspect the refreshed state and
 reapply any remaining changes. If tmux cannot be read during recovery, Bosana
 restores its last known snapshot; writes remain blocked if mutations may have
 occurred, until `:BosanaRefresh!` or `:e!` succeeds. Recovery failures are recorded
@@ -301,4 +331,6 @@ mutations, exclusions, failures, concealment, undo, and child Neovim exit behavi
 Preview tests cover active-pane captures, cursor changes, unsaved moves, reloads,
 asynchronous cancellation, failures, cleanup, Unicode clipping, and attached-UI
 colors/styles, resizing, and exit.
+Creation tests cover new and default windows, mixed transfers, name reuse, server
+startup, ordering, exclusions, confirmation, native IDs, and partial failures.
 See [the complete test outline](tests/README.md) for every test and its purpose.

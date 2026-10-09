@@ -25,6 +25,17 @@ function M.window_ids(session)
   return ids
 end
 
+function M.resolve(desired, ids)
+  local resolved = vim.deepcopy(desired)
+  for _, session in ipairs(resolved.sessions) do
+    session.id = ids[session.id] or session.id
+    for _, window in ipairs(session.windows) do
+      window.id = ids[window.id] or window.id
+    end
+  end
+  return M.index(resolved)
+end
+
 -- Active-window changes are navigation, not conflicting edits.
 function M.signature(state)
   local sessions = {}
@@ -61,7 +72,7 @@ function M.name_error(name, kind)
 end
 
 -- Desired state has no index requirements: rows specify relative order only.
-function M.matches_desired(actual, desired, baseline)
+function M.matches_desired(actual, desired, baseline, server_id)
   local expected_sessions = 0
   for _, wanted in ipairs(desired.sessions) do
     expected_sessions = expected_sessions + 1
@@ -73,7 +84,7 @@ function M.matches_desired(actual, desired, baseline)
       return false, "Window membership/order did not reach the desired state: " .. wanted.id
     end
     for i, window in ipairs(wanted.windows) do
-      if session.windows[i].name ~= window.name then
+      if not window.implicit and session.windows[i].name ~= window.name then
         return false, "Window did not reach the desired name: " .. window.id
       end
     end
@@ -92,7 +103,7 @@ function M.matches_desired(actual, desired, baseline)
   if #actual.sessions ~= expected_sessions then
     return false, "Unexpected sessions remain after applying changes"
   end
-  if #actual.sessions > 0 and actual.server_id ~= baseline.server_id then
+  if #actual.sessions > 0 and actual.server_id ~= (server_id or baseline.server_id) then
     return false, "The tmux server changed while applying changes"
   end
   return true

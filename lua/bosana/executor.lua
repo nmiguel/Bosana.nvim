@@ -1,8 +1,9 @@
 local model = require("bosana.model")
+local tmux = require("bosana.tmux")
 local M = {}
 
 function M.execute(client, baseline, desired, operations, before_execute)
-  local report = { completed = {}, attempted = false }
+  local report = { completed = {}, attempted = false, created = { ids = {}, rows = {} } }
   local current, snapshot_err = client:snapshot(baseline.excluded)
   if not current then
     return nil, snapshot_err, report
@@ -27,10 +28,18 @@ function M.execute(client, baseline, desired, operations, before_execute)
     end
   end
 
-  local function command(args)
-    local identity, identity_err = client:display(nil, "#{pid}\t#{start_time}\t#{socket_path}")
-    if not identity or identity ~= baseline.server_id then
-      error(identity_err or "The tmux server changed while applying changes", 0)
+  local server_id = baseline.server_id
+  local function command(args, start_server)
+    if not server_id and start_server then
+      local fresh, err = client:snapshot(baseline.excluded)
+      if not fresh or not model.same(fresh, baseline) then
+        error(err or "The tmux server changed while applying changes", 0)
+      end
+    else
+      local identity, identity_err = client:display(nil, "#{pid}\t#{start_time}\t#{socket_path}")
+      if not identity or identity ~= server_id then
+        error(identity_err or "The tmux server changed while applying changes", 0)
+      end
     end
     report.attempted = true
     local out, err = client:run(args)
@@ -39,6 +48,17 @@ function M.execute(client, baseline, desired, operations, before_execute)
       error(err, 0)
     end
     report.completed[#report.completed + 1] = vim.deepcopy(args)
+    return out
+  end
+  local function resolve(id)
+    return report.created.ids[id] or id
+  end
+  local function register(reference, id)
+    report.created.ids[reference] = id
+    local entry = desired.by_session[reference] or desired.by_window[reference]
+    if entry and entry.row then
+      report.created.rows[entry.row] = id
+    end
   end
   local function windows(id)
     local result, err = client:windows(id)
@@ -49,28 +69,86 @@ function M.execute(client, baseline, desired, operations, before_execute)
   end
   local live_sessions = {}
   local temporary_links = {}
+  local bootstraps = {}
   for _, session in ipairs(current.sessions) do
     live_sessions[session.id] = true
   end
 
   local ok, execution_err = pcall(function()
-    for _, operation in ipairs(operations) do
-      report.operation = vim.deepcopy(operation)
-      if operation.kind == "link_window" then
+    for _, planned in ipairs(operations) do
+      local operation = vim.deepcopy(planned)
+      for _, key in ipairs({ "id", "session", "source", "destination", "bootstrap" }) do
+        if operation[key] then
+          operation[key] = resolve(operation[key])
+        end
+      end
+      if operation.windows then
+        for i, id in ipairs(operation.windows) do
+          operation.windows[i] = resolve(id)
+        end
+      end
+      report.operation = operation
+      if operation.kind == "create_session" or operation.kind == "create_window" then
+        if operation.kind == "create_window" then
+          local destination = windows(operation.session)
+          operation.index = destination[#destination].index + 1
+          if operation.index > 2147483647 then
+            error("No append slot available in destination session " .. operation.session, 0)
+          end
+        end
+        local out = command(client:creation_args(operation), operation.kind == "create_session")
+        local result, err = tmux.creation_result(out)
+        if not result then
+          error(err, 0)
+        end
+        if server_id and result.server_id ~= server_id then
+          error("The tmux server changed while applying changes", 0)
+        end
+        server_id = result.server_id
+        report.server_id = server_id
+        if operation.kind == "create_session" then
+          register(planned.id, result.session_id)
+          register(planned.window.id, result.window_id)
+          live_sessions[result.session_id] = true
+          if operation.window.bootstrap then
+            bootstraps[#bootstraps + 1] = { session = result.session_id, id = result.window_id }
+          end
+        else
+          if result.session_id ~= operation.session then
+            error("Window was created in an unexpected session", 0)
+          end
+          register(planned.id, result.window_id)
+        end
+      elseif operation.kind == "link_window" then
         local destination = windows(operation.destination)
-        local index = destination[#destination].index + 1
+        local index
+        local args = { "link-window", "-d" }
+        if operation.bootstrap then
+          for _, window in ipairs(destination) do
+            if window.id == operation.bootstrap then
+              index = window.index
+              break
+            end
+          end
+          if not index then
+            error("Temporary initial window disappeared from " .. operation.destination, 0)
+          end
+          -- Replace only our disposable placeholder, preserving the new
+          -- session's base-index slot without ever leaving it windowless.
+          args[#args + 1] = "-k"
+        else
+          index = destination[#destination].index + 1
+        end
         if index > 2147483647 then
           error("No append slot available in destination session " .. operation.destination, 0)
         end
         temporary_links[#temporary_links + 1] = operation
-        command({
-          "link-window",
-          "-d",
+        command(vim.list_extend(args, {
           "-s",
           operation.source .. ":" .. operation.id,
           "-t",
-          operation.destination .. ":" .. index,
-        })
+          operation.destination .. ":" .. (operation.bootstrap or index),
+        }))
       elseif operation.kind == "unlink_window" then
         local source = windows(operation.session)
         command({ "unlink-window", "-k", "-t", operation.session .. ":" .. operation.id })
@@ -163,7 +241,15 @@ function M.execute(client, baseline, desired, operations, before_execute)
     -- Completed transfers and destructive operations are not rolled back.
     report.cleanup = {}
     local identity = client:display(nil, "#{pid}\t#{start_time}\t#{socket_path}")
-    if identity == baseline.server_id then
+    if server_id and identity == server_id then
+      local function cleanup(args)
+        if client:display(nil, "#{pid}\t#{start_time}\t#{socket_path}") ~= server_id then
+          return
+        end
+        local out, cleanup_err = client:run(args)
+        report.cleanup[#report.cleanup + 1] =
+          { command = args, error = out == nil and cleanup_err or nil }
+      end
       for _, link in ipairs(temporary_links) do
         local source, destination = client:windows(link.source), client:windows(link.destination)
         local function contains(list)
@@ -175,10 +261,17 @@ function M.execute(client, baseline, desired, operations, before_execute)
           return false
         end
         if contains(source) and contains(destination) then
-          local args = { "unlink-window", "-k", "-t", link.destination .. ":" .. link.id }
-          local out, cleanup_err = client:run(args)
-          report.cleanup[#report.cleanup + 1] =
-            { command = args, error = out == nil and cleanup_err or nil }
+          cleanup({ "unlink-window", "-k", "-t", link.destination .. ":" .. link.id })
+        end
+      end
+      -- Only disposable initial windows are removed, never newly created user
+      -- windows or completed transfers. An otherwise empty bootstrap session
+      -- disappears automatically when its placeholder is killed.
+      for _, bootstrap in ipairs(bootstraps) do
+        for _, window in ipairs(client:windows(bootstrap.session) or {}) do
+          if window.id == bootstrap.id then
+            cleanup({ "kill-window", "-t", bootstrap.session .. ":" .. bootstrap.id })
+          end
         end
       end
     end
@@ -190,7 +283,8 @@ function M.execute(client, baseline, desired, operations, before_execute)
     report.message = err
     return nil, "Could not verify tmux state: " .. err, report
   end
-  local matches, mismatch = model.matches_desired(actual, desired, current)
+  local matches, mismatch =
+    model.matches_desired(actual, model.resolve(desired, report.created.ids), current, server_id)
   if not matches then
     report.message = mismatch
     return nil, mismatch, report
