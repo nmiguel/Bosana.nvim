@@ -4,6 +4,7 @@ vim.cmd("runtime plugin/bosana.lua")
 
 local t = require("tests.helpers")
 local ok, err = xpcall(function()
+  require("tests.loading")
   require("tests.unit")
   require("tests.integration")
   require("tests.creation")

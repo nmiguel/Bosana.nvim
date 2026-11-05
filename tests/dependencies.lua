@@ -158,25 +158,23 @@ t.test("health reports unsupported linked-window topology", function()
   )
 end)
 
-t.test("both lowercase and capitalized checkhealth commands discover Bosana", function()
+t.test("the lowercase checkhealth command discovers Bosana", function()
   local _, _, path = t.fixture({ { "a" } })
   bosana.setup({ socket_path = path })
-  for _, name in ipairs({ "bosana", "Bosana" }) do
-    vim.cmd("checkhealth " .. name)
-    local bufnr = vim.api.nvim_get_current_buf()
-    -- Newer Neovim versions render health reports asynchronously.
-    t.ok(
-      vim.wait(15000, function()
-        return vim.api.nvim_buf_is_valid(bufnr) and not vim.bo[bufnr].modifiable
-      end, 10),
-      "Health check did not finish"
-    )
-    local text = table.concat(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), "\n")
-    t.contains(text, "Bosana")
-    t.contains(text, "tmux executable:")
-    t.contains(text, "Selected server is readable")
-    t.eq(text:find("ERROR", 1, true), nil)
-  end
+  vim.cmd("checkhealth bosana")
+  local bufnr = vim.api.nvim_get_current_buf()
+  -- Newer Neovim versions render health reports asynchronously.
+  t.ok(
+    vim.wait(15000, function()
+      return vim.api.nvim_buf_is_valid(bufnr) and not vim.bo[bufnr].modifiable
+    end, 10),
+    "Health check did not finish"
+  )
+  local text = table.concat(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), "\n")
+  t.contains(text, "Bosana")
+  t.contains(text, "tmux executable:")
+  t.contains(text, "Selected server is readable")
+  t.eq(text:find("ERROR", 1, true), nil)
 end)
 
 t.test("health checks manager host exclusion without changing its lifecycle options", function()

@@ -24,12 +24,6 @@ local function open(path, opts)
   )
 end
 
-t.test("capitalized module inference resolves to the same public API", function()
-  t.eq(require("Bosana"), bosana)
-  require("Bosana").setup({ confirm = false, icons = false })
-  t.eq(require("bosana.config").get().icons, false)
-end)
-
 t.test("icons follow linewise edits and undo without entering names", function()
   local _, baseline, path = t.fixture()
   local bufnr = open(path, { icons = { session = "S", window = "W" } })
